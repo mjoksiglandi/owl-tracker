@@ -1,4 +1,4 @@
-# 🦉 Owl Tracker (Privado)
+# 🦉 Owl Tracker
 
 Proyecto de telemetría IoT basado en **ESP32 + SIMCom A7670G (Cat‑1/LTE)** sobre **PlatformIO**.  
 Objetivo: conectar a red celular, obtener estado del módem (operador/RSSI/RAT), y enviar datos (JSON) a un backend HTTP/MQTT.  
@@ -34,7 +34,7 @@ Editar
 ---
 
 ## 🧱 Estructura del proyecto
-
+````
 Owl/
 ├─ include/ # Headers (.h)
 │ └─ board_pins.h, config.h, net_config.h
@@ -47,14 +47,10 @@ Owl/
 ├─ platformio.ini
 └─ README.md
 
-yaml
-Copiar
-Editar
-
----
+````
 
 ## 🔌 Hardware
-
+````
 - Placa: **LILYGO T‑A7670G** (ESP32‑WROVER‑E + SIMCom A7670G).
 - Pines usados (revisión R2):
   - **MODEM_TX (ESP32→A7670 RX): 26**
@@ -64,7 +60,7 @@ Editar
 - Antena LTE conectada y **SIM nano** (sin PIN).
 - **Alimentación robusta** (picos >2 A). Ideal: batería 18650 + USB.
 
----
+````
 
 ## ⚙️ Setup (PlatformIO)
 
@@ -96,6 +92,7 @@ usar SSL nativo del SIMCom vía AT (pendiente de decisión).
 ````
 
 🌐 Configuración de red
+```
 include/net_config.h:
 
 cpp
@@ -114,6 +111,7 @@ namespace netcfg {
   inline const char* AUTH_BEARER = "";      // ej. "Bearer <token>"
   inline const uint32_t PUT_PERIOD_MS = 5000;
 }
+````
 ▶️ Cómo compilar y probar
 Conectar la placa, abrir VS Code → PlatformIO.
 
@@ -125,7 +123,7 @@ Abrir Monitor Serie @115200. Debe aparecer el log de arriba.
 
 🔎 Utilidades
 Conversión CSQ→dBm (puedes dejarla en main.cpp o utils.*):
-
+```
 cpp
 Copiar
 Editar
@@ -135,13 +133,15 @@ inline int csq_to_dbm(int csq) {
   if (csq >= 31) return -51;
   return -113 + 2 * csq;
 }
+
 Forzar LTE only en boot:
 
 AT+CNMP=38 y verificación con AT+CNMP? → +CNMP: 38
 
 Persistencia: AT&W (si el firmware lo guarda).
-
+````
 🪜 Hoja de ruta (paso a paso)
+````
 Fase 1 — Base (listo)
 Power‑on, LTE only, registro, PDP, prints de operador/RSSI/RAT/IP.
 
@@ -179,8 +179,9 @@ Autenticación (Bearer o x-api-key).
 Esquema estable de payload.
 
 Versionado de API y métricas.
-
+````
 🧪 Diagnóstico rápido
+
 ¿No responde AT? Revisa EN (12), PWRKEY (4) y tiempos (settle ≥ 4000 ms).
 
 RSSI=99: valor desconocido (acaba de registrar o poca señal). Esperar 1–2 min o mover antena.
