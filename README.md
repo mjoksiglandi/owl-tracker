@@ -1,19 +1,38 @@
-# 🦉 Owl Tracker
+#🦉 Owl Tracker
 
-Proyecto de telemetría IoT basado en **ESP32 + SIMCom A7670G (Cat‑1/LTE)** sobre **PlatformIO**.  
-Objetivo: conectar a red celular, obtener estado del módem (operador/RSSI/RAT), y enviar datos (JSON) a un backend HTTP/MQTT.  
-Este repositorio es **privado** y de uso interno.
+Proyecto de telemetría IoT basado en ESP32 + SIMCom A7670G (Cat-1/LTE) sobre PlatformIO.
+Objetivo: conectar a red celular, obtener estado del módem (operador/RSSI/RAT), mostrar datos en un OLED SH1122 256×64 y enviar payload JSON a un backend HTTP/MQTT.
 
 
-## ✅ Estado actual (hito base)
+##✅ Estado actual (hito base)
 
-- Secuencia de **power‑on** del A7670G (EN=12, PWRKEY=4).
-- Forzado de **LTE only (AT+CNMP=38)** con verificación y persistencia (`AT&W`).
-- **Registro de red** (+ prints de operador / RSSI / RAT).
-- **PDP activo** (APN WOM: `internet`) y **IP obtenida**.
+Secuencia de power-on del A7670G (EN=12, PWRKEY=4).
+
+Forzado de LTE only (AT+CNMP=38) con verificación y persistencia (AT&W).
+
+Registro de red (+ prints de operador / RSSI / RAT).
+
+PDP activo (APN WOM: internet) y IP obtenida.
+
+Interfaz gráfica en OLED SH1122 256×64:
+
+Icono de antena + barras RSSI (0–5).
+
+Estado de PDP: muestra IP o “SIN PDP” invertido.
+
+Icono 🌍 + barras finas (nivel Iridium, reservado a futuro).
+
+Lat/Lon centrados.
+
+🛰 SAT/PDOP a la izquierda.
+
+Fecha/hora UTC en el centro inferior.
+
+Contador de mensajes recibidos a la derecha.
 
 Salida típica por monitor serie:
-````[Owl] Power: EN=HIGH, PWRKEY pulse HIGH (1200ms + 4000ms)
+````
+[Owl] Power: EN=HIGH, PWRKEY pulse HIGH (1200ms + 4000ms)
 [Owl] Inicializando módem...
 [Owl][AT] +CNMP=38 -> OK
 [Owl] RAT = LTE only confirmado
@@ -33,26 +52,36 @@ Owl/
 ├─ include/ # Headers (.h)
 │ └─ board_pins.h, config.h, net_config.h
 ├─ src/
-│ ├─ main.cpp # Punto de entrada (stages)
-│ ├─ modem_config.h/.cpp # Encendido y configuración RAT + registro
-│ ├─ http_client.h/.cpp # (cliente HTTP simple; en evolución)
-│ └─ core/log.* # (si se usa logging custom)
-├─ lib/ # Librerías locales (opcional)
+│ ├─ main.cpp             # Punto de entrada (stages)
+│ ├─ modem_config.*       # Encendido y configuración RAT + registro
+│ ├─ http_client.*        # Cliente HTTP (modo prueba)
+│ └─ oled_display.*       # Driver + UI OLED SH1122 256×64 
+├─ lib/                   # Librerías locales (opcional)
 ├─ platformio.ini
 └─ README.md
+
 
 ````
 
 ## 🔌 Hardware
 ````
-- Placa: **LILYGO T‑A7670G** (ESP32‑WROVER‑E + SIMCom A7670G).
+- Placa: **LILYGO T-A7670G** (ESP32-WROVER-E + SIMCom A7670G).
 - Pines usados (revisión R2):
-  - **MODEM_TX (ESP32→A7670 RX): 26**
-  - **MODEM_RX (ESP32←A7670 TX): 27**
-  - **MODEM_PWR (PWRKEY): 4**
-  - **MODEM_EN: 12**
-- Antena LTE conectada y **SIM nano** (sin PIN).
-- **Alimentación robusta** (picos >2 A). Ideal: batería 18650 + USB.
+  - MODEM_TX (ESP32→A7670 RX): 26
+  - MODEM_RX (ESP32←A7670 TX): 27
+  - MODEM_PWR (PWRKEY): 4
+  - MODEM_EN: 12
+- Antena LTE conectada y SIM nano (sin PIN).
+- Alimentación robusta (>2 A picos).
+
+- OLED: **SH1122 256×64 SPI**
+  - SCK = 18
+  - MOSI = 23
+  - CS = 5
+  - DC = 21
+  - RST = 22
+  - VCC = 3V3, GND común
+
 
 ````
 
@@ -60,7 +89,7 @@ Owl/
 
 `platformio.ini` (fragmento clave):
 
-```ini
+```
 [env:owl]
 platform = espressif32
 board = esp32dev
@@ -77,21 +106,15 @@ build_flags =
 lib_deps =
   https://github.com/lewisxhe/TinyGSM-fork.git#master
   bblanchon/ArduinoJson @ ^7
-  arduino-libraries/ArduinoHttpClient @ ^0.6.0   ; (para HTTP en claro)
-TLS/HTTPS: el fork usado no expone TinyGsmClientSecure. Para HTTPS evaluaremos:
+  arduino-libraries/ArduinoHttpClient @ ^0.6.0
+  olikraus/U8g2 @ ^2.35.8
 
-migrar a TinyGSM oficial + TINY_GSM_USE_SSL, o
-
-usar SSL nativo del SIMCom vía AT (pendiente de decisión).
 ````
 
 🌐 Configuración de red
 ```
 include/net_config.h:
 
-cpp
-Copiar
-Editar
 namespace netcfg {
   // WOM (Chile)
   inline const char* APN      = "internet";
@@ -99,28 +122,29 @@ namespace netcfg {
   inline const char* APN_PASS = "";
 
   // Endpoint (temporal de prueba o backend real)
-  inline const char* HOST = "httpbin.org";  // cambiar cuando haya API
-  inline const uint16_t  PORT = 80;         // 80 HTTP claro (temporal)
+  inline const char* HOST = "httpbin.org";
+  inline const uint16_t  PORT = 80;
   inline const char* PATH = "/put";
-  inline const char* AUTH_BEARER = "";      // ej. "Bearer <token>"
+  inline const char* AUTH_BEARER = "";
   inline const uint32_t PUT_PERIOD_MS = 5000;
 }
+
 ````
 ▶️ Cómo compilar y probar
-Conectar la placa, abrir VS Code → PlatformIO.
+
+Conectar la placa y abrir VS Code → PlatformIO.
 
 Verificar pines y APN en board_pins.h / net_config.h.
 
-Build y Upload.
+Build + Upload.
 
-Abrir Monitor Serie @115200. Debe aparecer el log de arriba.
+Abrir Monitor Serie @115200 → ver logs.
+
+El OLED mostrará la UI estilo “celular” con datos básicos.
 
 🔎 Utilidades
 Conversión CSQ→dBm (puedes dejarla en main.cpp o utils.*):
 ```
-cpp
-Copiar
-Editar
 inline int csq_to_dbm(int csq) {
   if (csq <= 0)  return -113;
   if (csq == 1)  return -111;
@@ -137,51 +161,39 @@ Persistencia: AT&W (si el firmware lo guarda).
 🪜 Hoja de ruta (paso a paso)
 ````
 Fase 1 — Base (listo)
-Power‑on, LTE only, registro, PDP, prints de operador/RSSI/RAT/IP.
+Power-on, LTE only, registro, PDP, UI OLED inicial.
 
 Fase 2 — HTTP PUT JSON (modo prueba)
 Cliente HTTP sin TLS (puerto 80).
-
-Enviar payload mínimo con {imei, operator, csq, rssi_dbm, ts_ms} a httpbin.org/put.
-
-Reintentos + reconexión PDP si falla.
+Enviar payload mínimo con {imei, operator, csq, rssi_dbm, ts_ms}.
 
 Fase 3 — TLS/HTTPS
-Opción A: migrar a TinyGSM oficial + TINY_GSM_USE_SSL.
-
-Opción B: SSL por AT (contextos TLS del SIMCom).
-
-Cargar Root CA y validar certificado del backend.
+Migrar a TinyGSM oficial con SSL o usar AT TLS nativo.
 
 Fase 4 — GNSS / GPS
-Activar GNSS del A7670G o módulo externo.
-
-Parsear NMEA, obtener lat/lon/alt/speed/hdop.
-
-Enviar JSON {lat, lon, speed, hdop, t} en el mismo PUT.
+Integrar GNSS externo (ej. NEO-M9N).
+Mostrar satélites/PDOP en OLED + enviar en payload.
 
 Fase 5 — Robustez
-Backoff exponencial en reintentos.
+Reintentos, watchdog, colas offline (FS/SD).
 
-Watchdog + auto‑restart del módem en fallas.
+Fase 6 — Iridium (futuro)
+Módulo de respaldo satelital (nivel señal en OLED 🌍).
 
-Persistencia de colas offline (FS/SD) si no hay red.
+Fase 7 — Backend real
+Autenticación (Bearer o x-api-key), payload definitivo.
 
-Fase 6 — Backend real
-Autenticación (Bearer o x-api-key).
-
-Esquema estable de payload.
-
-Versionado de API y métricas.
 ````
 🧪 Diagnóstico rápido
 
-¿No responde AT? Revisa EN (12), PWRKEY (4) y tiempos (settle ≥ 4000 ms).
+¿No responde AT? → Revisa EN (12), PWRKEY (4), settle ≥ 4000 ms.
 
-RSSI=99: valor desconocido (acaba de registrar o poca señal). Esperar 1–2 min o mover antena.
+RSSI=99 → valor desconocido, esperar registro o mover antena.
 
-Sin PDP: validar APN; reiniciar con gprsDisconnect() → gprsConnect(); revisar IP/antena.
+“SIN PDP” en OLED → revisar APN, reconectar con gprsDisconnect() + gprsConnect().
 
-Alimentación: imprescindible >2 A en picos.
+OLED sin imagen → verificar pines, VCC=3.3 V, contraste en oled_init().
+
+Alimentación: imprescindible >2 A en picos.
 
 
