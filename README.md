@@ -4,7 +4,6 @@ Proyecto de telemetría IoT basado en **ESP32 + SIMCom A7670G (Cat‑1/LTE)** so
 Objetivo: conectar a red celular, obtener estado del módem (operador/RSSI/RAT), y enviar datos (JSON) a un backend HTTP/MQTT.  
 Este repositorio es **privado** y de uso interno.
 
----
 
 ## ✅ Estado actual (hito base)
 
@@ -14,7 +13,7 @@ Este repositorio es **privado** y de uso interno.
 - **PDP activo** (APN WOM: `internet`) y **IP obtenida**.
 
 Salida típica por monitor serie:
-[Owl] Power: EN=HIGH, PWRKEY pulse HIGH (1200ms + 4000ms)
+````[Owl] Power: EN=HIGH, PWRKEY pulse HIGH (1200ms + 4000ms)
 [Owl] Inicializando módem...
 [Owl][AT] +CNMP=38 -> OK
 [Owl] RAT = LTE only confirmado
@@ -26,12 +25,7 @@ Salida típica por monitor serie:
 [Owl] RAT: 38
 [Owl] PDP ACTIVO
 [Owl] IP: 223.44.156.252
-
-yaml
-Copiar
-Editar
-
----
+````
 
 ## 🧱 Estructura del proyecto
 ````
