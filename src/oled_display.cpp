@@ -1,10 +1,14 @@
+#include "board_pins.h"
 #include "oled_display.h"
 #include <U8g2lib.h>
 #include <SPI.h>
 
 // SH1122 256x64, SPI HW 4‑hilos
-U8G2_SH1122_256X64_F_4W_HW_SPI u8g2(
-  U8G2_R0, /*cs=*/OLED_PIN_CS, /*dc=*/OLED_PIN_DC, /*reset=*/OLED_PIN_RST
+// U8G2_SSD1322_NHD_256X64_F_4W_SW_SPI u8g2(
+//   U8G2_R0, /*clk=*/18, /*mosi=*/23, /*cs=*/5, /*dc=*/21, /*reset=*/22
+// );
+U8G2_SSD1322_NHD_256X64_F_4W_HW_SPI u8g2(
+  U8G2_R0, /*cs=*/5, /*dc=*/21, /*reset=*/22
 );
 
 // ===== Helpers señal =====
@@ -66,7 +70,7 @@ bool oled_init() {
   SPI.begin(OLED_PIN_SCK, /*MISO=*/-1, OLED_PIN_MOSI, OLED_PIN_CS);
   u8g2.begin();
   u8g2.enableUTF8Print();
-  u8g2.setContrast(200);                 // ajusta 160..220 si lo ves muy tenue/brillante
+  u8g2.setContrast(180);                 // ajusta 160..220 si lo ves muy tenue/brillante
   return true;
 }
 
