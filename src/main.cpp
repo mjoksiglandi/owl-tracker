@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <TinyGsmClient.h>
+#include "oled_display.h"
 #include "modem_config.h"
 #include "http_client.h"
 #include "net_config.h"
@@ -19,6 +20,8 @@ const bool ENABLE_PUT = false;
 void setup() {
   Serial.begin(115200);
   delay(200);
+  oled_init();
+  oled_splash("Owl Tracker");
 
   // UART al módem
   SerialAT.begin(MODEM_BAUD, SERIAL_8N1, MODEM_RX, MODEM_TX);
@@ -56,11 +59,35 @@ void setup() {
 
   // HTTP client (ahora mismo sin TLS)
   http.begin(modem, netcfg::HOST, netcfg::PORT, netcfg::ROOT_CA);
+
+  OwlUiData ui;
+    ui.csq = modem.getSignalQuality();
+    ui.ip  = modem.localIP().toString();         // "0.0.0.0" o "" => mostrará SIN PDP
+    ui.iridiumLvl = -1;                          // 0..5 cuando lo integres
+    ui.lat = NAN; ui.lon = NAN;                  // rellena cuando integres GNSS
+    ui.sats = -1; ui.pdop = -1.0f;
+    ui.msgRx = 0;
+    ui.utc   = "2025-08-20 12:34:56Z";           // luego lo alimentamos con NTP/RTC
+
+    oled_draw_dashboard(ui);
 }
 
 void loop() {
-  // if (ENABLE_PUT) {
-  //   http.putJson(netcfg::PATH, "{\"status\":\"ok\"}", netcfg::AUTH_BEARER);
-  // }
-  // delay(netcfg::PUT_PERIOD_MS);
+  // refresco cada 1s (ejemplo)
+  static uint32_t t0 = 0;
+  if (millis() - t0 >= 1000) {
+    t0 = millis();
+
+    OwlUiData ui;
+    ui.csq = modem.getSignalQuality();
+    ui.ip  = modem.localIP().toString();
+    ui.iridiumLvl = -1;
+    // GNSS futuro:
+    // ui.lat = <tu_lat>; ui.lon = <tu_lon>;
+    // ui.sats = <n_sats>; ui.pdop = <pdop>;
+    ui.msgRx = /* tu contador real */ 0;
+    ui.utc   = /* tu cadena UTC */ "2025-08-20 12:34:56Z";
+
+    oled_draw_dashboard(ui);
+  }
 }
