@@ -94,8 +94,6 @@ GpsFix fix = gps_last_fix();
   ui.utc  = fix.utc.length() ? (fix.utc + "Z") : String("");  // <- UTC visible
 
   oled_draw_dashboard(ui);
-
-
     Serial.println("[Owl] UI refrescada");
   }
 }

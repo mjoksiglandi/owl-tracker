@@ -11,30 +11,34 @@ U8G2_SSD1322_NHD_256X64_F_4W_HW_SPI u8g2(
 
 static inline int clamp(int v, int lo, int hi){ return v<lo?lo:(v>hi?hi:v); }
 
-// ---------------- Iconos ----------------
-static void drawAntenna(int x, int y){
-  u8g2.drawBox(x,   y-6, 2, 6);
-  u8g2.drawBox(x-2, y-2, 6, 2);
+// ---------------- Iconos (versión compacta) ----------------
+// Altura total ~10 px; pensados para y=12..14 (status bar)
+static void drawAntennaSmall(int x, int y){
+  // mástil 4 px + base 4 px ancho
+  u8g2.drawBox(x,   y-5, 1, 5);  // mástil
+  u8g2.drawBox(x-2, y-1, 5, 1);  // base
 }
-static void drawBars(int x, int y, uint8_t level, uint8_t maxBars, uint8_t step=2){
+static void drawBarsSmall(int x, int y, uint8_t level, uint8_t maxBars){
+  // barras de 1..4 px de alto, paso 1 px
   for (uint8_t i=0;i<maxBars;i++){
-    int h = 2 + i*2;
+    int h = 1 + i;                 // 1,2,3,4 px
     int yy = y - h;
-    int xx = x + i*(step+2);
-    if (i < level) u8g2.drawBox(xx, yy, step, h);
-    else           u8g2.drawFrame(xx, yy, step, h);
+    int xx = x + i*3;              // 2 px ancho + 1 px espacio
+    if (i < level) u8g2.drawBox(xx, yy, 2, h);
+    else           u8g2.drawFrame(xx, yy, 2, h);
   }
 }
-static void drawSatellite(int x, int y){
-  u8g2.drawCircle(x+6, y-6, 6, U8G2_DRAW_ALL);
-  u8g2.drawLine(x+2,  y-6, x+10, y-6);
-  u8g2.drawLine(x+6,  y-10, x+6,  y-2);
+static void drawSatelliteSmall(int x, int y){
+  // círculo 4 px radio + cruces
+  u8g2.drawCircle(x+4, y-4, 4, U8G2_DRAW_ALL);
+  u8g2.drawLine(x+1, y-4, x+7, y-4);
+  u8g2.drawLine(x+4, y-7, x+4, y-1);
 }
-static void drawGlobe(int x, int y){
-  u8g2.drawCircle(x+6, y-6, 6, U8G2_DRAW_ALL);
-  u8g2.drawLine(x+2, y-6, x+10, y-6);
-  u8g2.drawLine(x+6, y-11, x+6, y-1);
-  u8g2.drawEllipse(x+6, y-6, 5, 3, U8G2_DRAW_ALL);
+static void drawGlobeSmall(int x, int y){
+  u8g2.drawCircle(x+4, y-4, 4, U8G2_DRAW_ALL);
+  u8g2.drawLine(x+1, y-4, x+7, y-4);
+  u8g2.drawLine(x+4, y-7, x+4, y-1);
+  u8g2.drawEllipse(x+4, y-4, 3, 2, U8G2_DRAW_ALL);
 }
 
 // ---------------- CSQ->barras (0..5) ----------------
@@ -60,17 +64,22 @@ static String fmtAlt(double a){
   snprintf(buf, sizeof(buf), "Alt: %.1f m", a);
   return String(buf);
 }
-static String fmtPdop(float p){
-  if (p<0) return "PDOP: --";
-  char buf[20]; snprintf(buf, sizeof(buf), "PDOP: %.1f", p);
-  return String(buf);
-}
 static String fmtMsgs(uint32_t n){
   char buf[24]; snprintf(buf, sizeof(buf), "MSG RX: %lu", (unsigned long)n);
   return String(buf);
 }
 static String fmtUtc(const String& s){
   return s.length() ? s : String("--:--:--Z");
+}
+
+// ---------------- PDOP -> letra (rango) ----------------
+static char pdopGrade(float pdop) {
+  if (pdop < 0)      return '-';  // sin datos
+  if (pdop < 1.5f)   return 'E';  // Excelente
+  if (pdop < 4.0f)   return 'B';  // Muy bueno / Suficiente
+  if (pdop < 6.0f)   return 'M';  // Bueno / Moderado
+  if (pdop < 10.0f)  return 'A';  // Moderado / Aceptable
+  return 'D';                      // Deficiente
 }
 
 // ---------------- Init ----------------
@@ -87,43 +96,42 @@ bool oled_init(){
 
 // ---------------- Dashboard ----------------
 // 256x64
-// Superior (y=14): CEL | GPS | IR
+// Superior (y=12): CEL | GPS | IR  (iconos compactos)
 // Centro   (y=34): Lat ...   Lon ...   Alt ...
-// Inferior (y=62): PDOP (izq)        UTC (centro)        MSG RX (der)
+// Inferior (y=62): PDOP letra (izq)    UTC (centro)    MSG RX (der)
 void oled_draw_dashboard(const OwlUiData& d){
   u8g2.clearBuffer();
 
-  // ---------- Superior ----------
-  int topY = 14;
+  // ---------- Superior (compacto) ----------
+  int topY = 12;
 
-  // CEL
-  drawAntenna(6, topY);
+  // Fuente pequeña para etiquetas
+  u8g2.setFont(u8g2_font_5x8_mf);
+
+  // CEL (izquierda)
+  drawAntennaSmall(4, topY);
   uint8_t bars = csq_to_bars(d.csq);
-  drawBars(16, topY, clamp(bars,0,5), 5, 2);
-  u8g2.setFont(u8g2_font_6x12_tf);
-  u8g2.drawStr(16 + 5*(2+2) + 4, topY, "CEL");
+  drawBarsSmall(10, topY, clamp(bars,0,5), 5);
+  u8g2.drawStr(10 + 5*3 + 3, topY, "CEL"); // 5 barras * 3px + margen
 
   // GPS (centro)
   int xgps = 100;
-  drawSatellite(xgps, topY);
-  char gpsBuf[20];
+  drawSatelliteSmall(xgps, topY);
+  char gpsBuf[12];
   if (d.sats >= 0) snprintf(gpsBuf, sizeof(gpsBuf), "GPS %02d", d.sats);
   else             snprintf(gpsBuf, sizeof(gpsBuf), "GPS --");
-  u8g2.drawStr(xgps + 16, topY, gpsBuf);
+  u8g2.drawStr(xgps + 12, topY, gpsBuf);
 
   // IR (derecha)
-  int xir = 196;
-  drawGlobe(xir, topY);
-  u8g2.setFont(u8g2_font_6x12_tf);
+  int xir = 188;
+  drawGlobeSmall(xir, topY);
   if (d.iridiumLvl < 0) {
-    // sin dato: NO barras, solo texto "IR --"
-    u8g2.drawStr(xir + 14, topY, "IR --");
+    u8g2.drawStr(xir + 12, topY, "IR --");
   } else {
     uint8_t irBars = clamp(d.iridiumLvl, 0, 5);
-    drawBars(xir + 14, topY, irBars, 5, 2);
-    u8g2.drawStr(xir + 14 + 5*(2+2) + 4, topY, "IR");
+    drawBarsSmall(xir + 12, topY, irBars, 5);
+    u8g2.drawStr(xir + 12 + 5*3 + 3, topY, "IR");
   }
-
 
   // ---------- Centro ----------
   u8g2.setFont(u8g2_font_6x12_tf);
@@ -137,12 +145,16 @@ void oled_draw_dashboard(const OwlUiData& d){
   u8g2.drawStr(256 - 6 - wAlt, 34, sAlt.c_str());
 
   // ---------- Inferior ----------
-  String sPdop = fmtPdop(d.pdop);
-  String sMsg  = fmtMsgs(d.msgRx);
-  String sUtc  = fmtUtc(d.utc);
+  // PDOP como letra
+  char grade = pdopGrade(d.pdop);
+  char pdopStr[12];
+  snprintf(pdopStr, sizeof(pdopStr), "PDOP: %c", grade);
+
+  String sMsg = fmtMsgs(d.msgRx);
+  String sUtc = fmtUtc(d.utc);
 
   // PDOP izquierda
-  u8g2.drawStr(6, 62, sPdop.c_str());
+  u8g2.drawStr(6, 62, pdopStr);
   // MSG derecha
   int wMsg = u8g2.getStrWidth(sMsg.c_str());
   u8g2.drawStr(256 - 6 - wMsg, 62, sMsg.c_str());

@@ -19,3 +19,13 @@ bool oled_init();
 
 // Dibuja el dashboard (siempre visible)
 void oled_draw_dashboard(const OwlUiData& d);
+
+inline char pdopToGrade(float pdop) {
+  if (pdop < 0) return '-';       // sin datos
+  if (pdop < 1.5f) return 'E';    // Excelente
+  if (pdop < 4.0f) return 'B';    // Bueno
+  if (pdop < 6.0f) return 'M';    // Moderado
+  if (pdop < 10.0f) return 'A';   // Aceptable
+  return 'D';                     // Deficiente
+}
+
