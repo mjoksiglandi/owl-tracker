@@ -37,4 +37,4 @@
 #define PIN_GPS_TX     33    // ESP32 TX -> RX del GPS (opcional)
 #define PIN_GPS_RX     34    // ESP32 RX <- TX del GPS (OBLIGATORIO)
 #define PIN_GPS_PWR    -1    // si tu módulo trae enable, pon el pin aquí; si no, deja -1
-#define GPS_BAUD       9600  // la mayoría de módulos NMEA por defecto
+#define GPS_BAUD       115200  // la mayoría de módulos NMEA por defecto

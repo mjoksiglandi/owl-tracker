@@ -5,16 +5,15 @@ struct GpsFix {
   bool   valid   = false;
   double lat     = NAN;
   double lon     = NAN;
-  int    sats    = -1;     // satélites en uso (de GGA)
-  float  pdop    = -1.0f;  // de GSA si está disponible
-  String utc     = "";     // HH:MM:SS (si lo traemos de GGA)
+  double alt     = NAN;   // metros MSL (de GGA)
+  int    sats    = -1;
+  float  pdop    = -1.0f; // de GSA
+  String utc     = "";    // "YYYY-MM-DD HH:MM:SS"
 };
 
-// Inicializa GPS por UART externo (NMEA). Devuelve true si ok.
-bool gps_begin_uart(HardwareSerial& gpsSerial, int rxPin, int txPin, uint32_t baud);
-
-// Debe llamarse MUY seguido (loop). Lee NMEA y actualiza el fix.
-void gps_poll(HardwareSerial& gpsSerial);
-
-// Obtiene la última solución (copia por valor).
+bool   gps_begin_uart(HardwareSerial& gpsSerial, int rxPin, int txPin, uint32_t baud);
+void   gps_poll(HardwareSerial& gpsSerial);
 GpsFix gps_last_fix();
+
+// Invalidar fix si no llegan NMEA por X ms (default 10s)
+void   gps_set_stale_timeout(uint32_t ms);
