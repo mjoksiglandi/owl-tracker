@@ -49,3 +49,8 @@
 #define PIN_SD_MOSI    15
 #define PIN_SD_SCK     14
 #define PIN_SD_CS      13
+
+// --- BOTONES (input-only, requieren pull-up externo, activos en LOW)
+#define PIN_BTN1   39   // Home / Menu (corto/largo)
+#define PIN_BTN2   36   // Mensajes / POI (corto/largo)
+#define PIN_BTN3   35   // SOS (largo 2s)
