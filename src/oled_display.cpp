@@ -4,85 +4,225 @@
 #include "board_pins.h"
 #include "oled_display.h"
 
-// HW SPI (VSPI)
+// HW SPI (SSD1322 256x64)
 U8G2_SSD1322_NHD_256X64_F_4W_HW_SPI u8g2(
   U8G2_R0, /*cs=*/OLED_PIN_CS, /*dc=*/OLED_PIN_DC, /*reset=*/OLED_PIN_RST
 );
 
-static inline int clamp(int v, int lo, int hi){ return v<lo?lo:(v>hi?hi:v); }
+// Utils
+static inline int clampi(int v, int lo, int hi){ return v<lo?lo:(v>hi?hi:v); }
 
-// -------- Iconos compactos (status bar) --------
-static void drawAntennaSmall(int x, int y){ u8g2.drawBox(x, y-5, 1, 5); u8g2.drawBox(x-2, y-1, 5, 1); }
-static void drawBarsSmall(int x, int y, uint8_t level, uint8_t maxBars){
-  for(uint8_t i=0;i<maxBars;i++){ int h=1+i, yy=y-h, xx=x+i*3; if(i<level) u8g2.drawBox(xx,yy,2,h); else u8g2.drawFrame(xx,yy,2,h); }
+// ---------------- Iconos (mini) ----------------
+// baseY es la línea inferior del icono (baseline)
+static void drawAntennaMini(int x, int baseY){
+  u8g2.drawBox(x, baseY-4, 1, 4);     // mástil
+  u8g2.drawBox(x-1, baseY-1, 3, 1);   // travesaño
 }
-static void drawSatelliteSmall(int x, int y){ u8g2.drawCircle(x+4,y-4,4,U8G2_DRAW_ALL); u8g2.drawLine(x+1,y-4,x+7,y-4); u8g2.drawLine(x+4,y-7,x+4,y-1); }
-static void drawGlobeSmall(int x, int y){ u8g2.drawCircle(x+4,y-4,4,U8G2_DRAW_ALL); u8g2.drawLine(x+1,y-4,x+7,y-4); u8g2.drawLine(x+4,y-7,x+4,y-1); u8g2.drawEllipse(x+4,y-4,3,2,U8G2_DRAW_ALL); }
-static void drawHeadingArrow8(int x,int y,float deg){
-  static const int8_t dx[8]={0,1,1,1,0,-1,-1,-1}, dy[8]={-1,-1,0,1,1,1,0,-1};
-  if(isnan(deg)){ u8g2.drawPixel(x,y-3); u8g2.drawFrame(x-2,y-5,4,4); return; }
-  int idx=(int)((deg+22.5f)/45.0f)&7; int cx=x,cy=y-3;
-  u8g2.drawLine(cx,cy,cx+dx[idx]*5,cy+dy[idx]*5);
-  u8g2.drawLine(cx+dx[idx]*3,cy+dy[idx]*3,cx+dx[(idx+1)&7]*2,cy+dy[(idx+1)&7]*2);
-  u8g2.drawLine(cx+dx[idx]*3,cy+dy[idx]*3,cx+dx[(idx+7)&7]*2,cy+dy[(idx+7)&7]*2);
+static void drawSatelliteMini(int x, int baseY){
+  u8g2.drawCircle(x+4, baseY-4, 4, U8G2_DRAW_ALL);
+  u8g2.drawLine(x+2, baseY-4, x+6, baseY-4);
+  u8g2.drawLine(x+4, baseY-6, x+4, baseY-2);
+}
+static void drawGlobeMini(int x, int baseY){
+  u8g2.drawCircle(x+4, baseY-4, 4, U8G2_DRAW_ALL);
+  u8g2.drawLine(x+1, baseY-4, x+7, baseY-4);
+  u8g2.drawLine(x+4, baseY-7, x+4, baseY-1);
+  u8g2.drawEllipse(x+4, baseY-4, 3, 2, U8G2_DRAW_ALL);
+}
+// barras mini 0..4
+static void drawBarsMini(int x, int baseY, uint8_t level){
+  const uint8_t maxBars = 4;
+  level = (level > maxBars) ? maxBars : level;
+  for (uint8_t i=0;i<maxBars;i++){
+    int h  = 1 + i;                // 1,2,3,4
+    int yy = baseY - h;
+    int xx = x + i*(1+1);          // ancho=1, gap=1
+    if (i < level) u8g2.drawBox(xx, yy, 1, h);
+    else           u8g2.drawFrame(xx, yy, 1, h);
+  }
 }
 
-// CSQ -> barras 0..5
-static uint8_t csq_to_bars(int csq){ if(csq<0||csq==99) return 0; if(csq<=3) return 1; if(csq<=9) return 2; if(csq<=15) return 3; if(csq<=22) return 4; return 5; }
+// ---------------- Mapas / Strings ----------------
+static uint8_t csq_to_bars4(int csq){
+  if (csq<0 || csq==99) return 0;
+  if (csq<=6)  return 1;
+  if (csq<=12) return 2;
+  if (csq<=20) return 3;
+  return 4;
+}
 
-// Strings
-static String fmtCoord(double v, bool isLat){ if(isnan(v)) return isLat?"Lat: --.--":"Lon: --.--"; char b[28]; snprintf(b,sizeof(b),"%s%.6f",(isLat?(v<0?"S ":"N "):(v<0?"W ":"E ")),fabs(v)); return String(b); }
-static String fmtAlt(double a){ if(isnan(a)) return "Alt: -- m"; char b[24]; snprintf(b,sizeof(b),"Alt: %.1f m",a); return String(b); }
-static String fmtMsgs(uint32_t n){ char b[24]; snprintf(b,sizeof(b),"MSG RX: %lu",(unsigned long)n); return String(b); }
-static String fmtUtc(const String& s){ return s.length()?s:String("--:--:--Z"); }
+static String fmtCoord(double v, bool isLat){
+  if (isnan(v)) return isLat? "Lat: --.--" : "Lon: --.--";
+  char buf[28];
+  snprintf(buf, sizeof(buf), "%s%.6f",
+           (isLat?(v<0?"S ":"N "):(v<0?"W ":"E ")), fabs(v));
+  return String(buf);
+}
+static String fmtAlt(double a){
+  if (isnan(a)) return "Alt: -- m";
+  char buf[24]; snprintf(buf, sizeof(buf), "Alt: %.1f m", a);
+  return String(buf);
+}
+static String fmtMsgs(uint32_t n){
+  char buf[24]; snprintf(buf, sizeof(buf), "MSG %lu", (unsigned long)n);
+  return String(buf);
+}
+static String fmtUtc(const String& s){
+  return s.length() ? s : String("--:--:--Z");
+}
 
-// PDOP -> letra
-static char pdopGrade(float p){ if(p<0) return '-'; if(p<1.5f) return 'E'; if(p<4.0f) return 'B'; if(p<6.0f) return 'M'; if(p<10.0f) return 'A'; return 'D'; }
+// PDOP → acrónimo 3 letras
+static const char* pdop_code(float p){
+  if (!(p >= 0)) return "--";
+  if (p < 1.5f)  return "EXC";  // Excellent
+  if (p < 4.0f)  return "GUD";  // Good/Sufficient
+  if (p < 6.0f)  return "MOD";  // Moderate
+  if (p < 10.0f) return "ACC";  // Acceptable
+  return "POR";                 // Poor
+}
 
+// ---------------- Init & splash ----------------
 bool oled_init(){
   SPI.begin(OLED_PIN_SCK, /*MISO*/-1, OLED_PIN_MOSI, OLED_PIN_CS);
-  pinMode(OLED_PIN_RST, OUTPUT); digitalWrite(OLED_PIN_RST, LOW); delay(10); digitalWrite(OLED_PIN_RST, HIGH); delay(10);
-  u8g2.begin(); u8g2.setContrast(210); return true;
+  pinMode(OLED_PIN_RST, OUTPUT);
+  digitalWrite(OLED_PIN_RST, LOW);  delay(10);
+  digitalWrite(OLED_PIN_RST, HIGH); delay(10);
+  u8g2.begin();
+  u8g2.setContrast(210);
+  return true;
 }
 
-// Layout 256x64
-// top y=12: CEL | GPS nn | ↗ Vx.x | Pxxxx | IR
-// mid y=34 : Lat ... | Lon ... | Alt ...
-// bot y=62 : PDOP: G |   UTC   | MSG RX: n
+void oled_splash(const char* title){
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_profont29_mf);
+  int w = u8g2.getStrWidth(title);
+  u8g2.drawStr((256 - w)/2, 36, title);
+  u8g2.sendBuffer();
+}
+
+// ---------------- HOME / Dashboard ----------------
+//  ┌─────────────────────────────────────────────────────────┐
+//  │  CEL ▂▂▂▂     GPS nn      IR --                 MSG xx  │ y≈3..14
+//  ├─────────────────────────────────────────────────────────┤ y=16
+//  │  Lat: ...            Lon: ...                Alt: ...    │ y=34
+//  ├─────────────────────────────────────────────────────────┤ y=48
+//  │  PREC: EXC                       UTC: 12:34:56Z          │ y=62
+//  └─────────────────────────────────────────────────────────┘
 void oled_draw_dashboard(const OwlUiData& d){
   u8g2.clearBuffer();
 
-  // --- TOP ---
-  int topY=12; u8g2.setFont(u8g2_font_5x8_mf);
-  drawAntennaSmall(4,topY); drawBarsSmall(10,topY,clamp(csq_to_bars(d.csq),0,5),5); u8g2.drawStr(10+5*3+3,topY,"CEL");
+  // separadores
+  u8g2.drawHLine(0, 16, 256);
+  u8g2.drawHLine(0, 48, 256);
 
-  int xgps=80; drawSatelliteSmall(xgps,topY); char gbuf[10];
-  if(d.sats>=0) snprintf(gbuf,sizeof(gbuf),"GPS %02d",d.sats); else snprintf(gbuf,sizeof(gbuf),"GPS --");
-  u8g2.drawStr(xgps+12,topY,gbuf);
+  // ---------- TOP ----------
+  u8g2.setFont(u8g2_font_5x8_tf);
+  const int baseY = 14;
 
-  int xv=150; drawHeadingArrow8(xv,topY,d.course_deg); char vbuf[10];
-  if(isnan(d.speed_mps)) snprintf(vbuf,sizeof(vbuf),"V-.-"); else snprintf(vbuf,sizeof(vbuf),"V%.1f",d.speed_mps);
-  u8g2.drawStr(xv+10,topY,vbuf);
+  int xCEL = 6;
+  int xGPS = 72;
+  int xIR  = 140;
 
-  int xp=196; char pbuf[12]; if(isnan(d.pressure_hpa)) snprintf(pbuf,sizeof(pbuf),"P----"); else snprintf(pbuf,sizeof(pbuf),"P%04d",(int)roundf(d.pressure_hpa));
-  u8g2.drawStr(xp,topY,pbuf);
+  // CEL
+  drawAntennaMini(xCEL, baseY);
+  drawBarsMini(xCEL+7, baseY, clampi(csq_to_bars4(d.csq),0,4));
+  u8g2.drawStr(xCEL+7 + 4*(1+1) + 4, baseY, "CEL");
 
-  int xir=232; drawGlobeSmall(xir,topY);
-  if(d.iridiumLvl<0){ u8g2.drawStr(xir+12,topY,"IR --"); }
-  else{ uint8_t ib=clamp(d.iridiumLvl,0,5); drawBarsSmall(xir+12,topY,ib,5); u8g2.drawStr(xir+12+5*3+3,topY,"IR"); }
+  // GPS
+  drawSatelliteMini(xGPS, baseY);
+  char gpsBuf[12];
+  if (d.sats >= 0) snprintf(gpsBuf, sizeof(gpsBuf), "GPS %02d", d.sats);
+  else             snprintf(gpsBuf, sizeof(gpsBuf), "GPS --");
+  u8g2.drawStr(xGPS + 12, baseY, gpsBuf);
 
-  // --- MID ---
+  // IR (placeholder)
+  drawGlobeMini(xIR, baseY);
+  if (d.iridiumLvl < 0) u8g2.drawStr(xIR + 12, baseY, "IR --");
+  else {
+    drawBarsMini(xIR + 12, baseY, clampi(d.iridiumLvl,0,4));
+    u8g2.drawStr(xIR + 12 + 4*(1+1) + 3, baseY, "IR");
+  }
+
+  // MSG (top-right)
+  String sMsgTop = fmtMsgs(d.msgRx);
+  int wMsgTop = u8g2.getStrWidth(sMsgTop.c_str());
+  u8g2.drawStr(256 - 6 - wMsgTop, baseY, sMsgTop.c_str());
+
+  // ---------- MIDDLE ----------
   u8g2.setFont(u8g2_font_6x12_tf);
-  String sLat=fmtCoord(d.lat,true), sLon=fmtCoord(d.lon,false), sAlt=fmtAlt(d.alt);
-  u8g2.drawStr(6,34,sLat.c_str()); u8g2.drawStr(90,34,sLon.c_str());
-  int wAlt=u8g2.getStrWidth(sAlt.c_str()); u8g2.drawStr(256-6-wAlt,34,sAlt.c_str());
+  String sLat = fmtCoord(d.lat, true);
+  String sLon = fmtCoord(d.lon, false);
+  String sAlt = fmtAlt(d.alt);
 
-  // --- BOT ---
-  char pd[12]; snprintf(pd,sizeof(pd),"PDOP: %c",pdopGrade(d.pdop));
-  String sMsg=fmtMsgs(d.msgRx), sUtc=fmtUtc(d.utc);
-  u8g2.drawStr(6,62,pd);
-  int wMsg=u8g2.getStrWidth(sMsg.c_str()); u8g2.drawStr(256-6-wMsg,62,sMsg.c_str());
-  int wUtc=u8g2.getStrWidth(sUtc.c_str()); u8g2.drawStr((256-wUtc)/2,62,sUtc.c_str());
+  u8g2.drawStr(6, 34,  sLat.c_str());
+  u8g2.drawStr(92, 34, sLon.c_str());
+  int wAlt = u8g2.getStrWidth(sAlt.c_str());
+  u8g2.drawStr(256 - 6 - wAlt, 34, sAlt.c_str());
 
+  // ---------- BOTTOM ----------
+  // Precisión (PDOP) como acrónimo de 3 letras
+  const char* pcode = pdop_code(d.pdop);
+  char precBuf[16]; snprintf(precBuf, sizeof(precBuf), "PREC: %s", pcode);
+  u8g2.drawStr(6, 62, precBuf);
+
+  // UTC centrado
+  String sUtc = fmtUtc(d.utc);
+  int wUtc = u8g2.getStrWidth(sUtc.c_str());
+  u8g2.drawStr((256 - wUtc)/2, 62, sUtc.c_str());
+
+  u8g2.sendBuffer();
+}
+
+// ---------------- Otras pantallas (stubs simples) ----------------
+void oled_draw_gps_detail(const OwlUiData& d){
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_6x12_tf);
+  u8g2.drawStr(6, 14, "GPS DETAIL");
+  char ln[40];
+  snprintf(ln, sizeof(ln), "Sats: %d  PDOP: %.1f", d.sats, d.pdop);
+  u8g2.drawStr(6, 30, ln);
+  String sLat = String("Lat: ") + (isnan(d.lat)?"--":String(d.lat,6));
+  String sLon = String("Lon: ") + (isnan(d.lon)?"--":String(d.lon,6));
+  String sAlt = String("Alt: ") + (isnan(d.alt)?"--":String(d.alt,1)) + " m";
+  u8g2.drawStr(6, 46, sLat.c_str());
+  u8g2.drawStr(6, 58, sLon.c_str());
+  int wAlt = u8g2.getStrWidth(sAlt.c_str());
+  u8g2.drawStr(256 - 6 - wAlt, 58, sAlt.c_str());
+  u8g2.sendBuffer();
+}
+
+void oled_draw_iridium_detail(bool present, int sigLevel, int unread, const String& imei){
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_6x12_tf);
+  u8g2.drawStr(6, 14, "IRIDIUM DETAIL");
+  u8g2.drawStr(6, 30, present ? "Module: PRESENT" : "Module: --");
+  char ln[40]; snprintf(ln, sizeof(ln), "Sig: %d  Unread: %d", sigLevel, unread);
+  u8g2.drawStr(6, 46, ln);
+  u8g2.drawStr(6, 62, ("IMEI: " + imei).c_str());
+  u8g2.sendBuffer();
+}
+
+void oled_draw_sys_config(const OwlUiData& d, bool netReg, bool pdpUp,
+                          const String& ip, bool sdOk, bool i2cOk, const char* fw){
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_6x12_tf);
+  u8g2.drawStr(6, 14, "SYS CONFIG");
+  char ln1[48]; snprintf(ln1, sizeof(ln1), "Net: %s  PDP: %s", netReg?"REG":"NO", pdpUp?"UP":"DOWN");
+  u8g2.drawStr(6, 30, ln1);
+  u8g2.drawStr(6, 44, ("IP: " + ip).c_str());
+  char ln2[48]; snprintf(ln2, sizeof(ln2), "SD:%s  I2C:%s  FW:%s", sdOk?"OK":"NO", i2cOk?"OK":"NO", fw);
+  u8g2.drawStr(6, 58, ln2);
+  u8g2.sendBuffer();
+}
+
+void oled_draw_messages(uint16_t unread, const String& last){
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_6x12_tf);
+  u8g2.drawStr(6, 14, "MESSAGES");
+  char ln[32]; snprintf(ln, sizeof(ln), "Unread: %u", unread);
+  u8g2.drawStr(6, 30, ln);
+  u8g2.drawStr(6, 48, "Last:");
+  int w = u8g2.getStrWidth("Last:");
+  u8g2.drawStr(6 + w + 6, 48, last.c_str());
   u8g2.sendBuffer();
 }

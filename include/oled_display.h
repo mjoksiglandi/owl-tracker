@@ -1,9 +1,10 @@
 #pragma once
 #include <Arduino.h>
 
+/** Datos comunes para todas las pantallas */
 struct OwlUiData {
   int    csq = 99;          // 0..31 (99=desconocido)
-  int    iridiumLvl = -1;   // 0..5 (futuro)  -1 = sin dato
+  int    iridiumLvl = -1;   // 0..5  (-1 = sin dato)
   int    sats = -1;         // satélites en uso
   float  pdop = -1.0f;      // PDOP
   double lat  = NAN;        // grados decimales
@@ -13,10 +14,29 @@ struct OwlUiData {
   String utc = "";          // "YYYY-MM-DD HH:MM:SSZ"
 
   // Vector GNSS + Baro
-  float  speed_mps = NAN;   // m/s (RMC)
-  float  course_deg = NAN;  // grados (RMC)
-  float  pressure_hpa = NAN;// hPa (MS5611)
+  float  speed_mps   = NAN; // m/s (RMC)
+  float  course_deg  = NAN; // grados (RMC)
+  float  pressure_hpa= NAN; // hPa (MS5611)
 };
 
+/** Inicialización del OLED (SSD1322 256x64 SPI) */
 bool oled_init();
+
+/** Pantalla de arranque/splash simple */
+void oled_splash(const char* title);
+
+/** HOME / Dashboard */
 void oled_draw_dashboard(const OwlUiData& d);
+
+/** Detalle de GPS */
+void oled_draw_gps_detail(const OwlUiData& d);
+
+/** Detalle de Iridium (placeholder) */
+void oled_draw_iridium_detail(bool present, int sigLevel, int unread, const String& imei);
+
+/** Configuración del sistema */
+void oled_draw_sys_config(const OwlUiData& d, bool netReg, bool pdpUp,
+                          const String& ip, bool sdOk, bool i2cOk, const char* fw);
+
+/** Bandeja de mensajes */
+void oled_draw_messages(uint16_t unread, const String& last);

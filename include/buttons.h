@@ -2,14 +2,15 @@
 #include <Arduino.h>
 
 struct ButtonEvent {
-  bool shortPress = false;
-  bool longPress  = false;
+  bool shortPress = false;   // flanco de liberación si duró < longThreshold
+  bool longPress  = false;   // flanco cuando excede longThreshold
 };
 
-void buttons_begin();               // config de pines
-void buttons_poll();                // leer + debouncing (llamar cada ~10ms)
+// init / polling
+void buttons_begin();
+void buttons_poll();
 
-// Eventos latched (se consumen al leer)
-ButtonEvent btn1_get();             // Home/Menu
-ButtonEvent btn2_get();             // Msg/POI
-ButtonEvent btn3_get();             // SOS (solo largo)
+// lectura de eventos (latched: se limpian al leer)
+ButtonEvent btn1_get();
+ButtonEvent btn2_get();
+ButtonEvent btn3_get();
