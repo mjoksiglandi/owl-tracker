@@ -12,31 +12,30 @@ struct OwlUiData {
   double alt  = NAN;        // metros MSL
   uint32_t msgRx = 0;       // contador de mensajes recibidos
   String utc = "";          // "YYYY-MM-DD HH:MM:SSZ"
-
-  // Vector GNSS + Baro
-  float  speed_mps   = NAN; // m/s (RMC)
-  float  course_deg  = NAN; // grados (RMC)
-  float  pressure_hpa= NAN; // hPa (MS5611)
+  // GNSS + Baro
+  float  speed_mps   = NAN; // m/s
+  float  course_deg  = NAN; // grados
+  float  pressure_hpa= NAN; // hPa
 };
 
 /** Inicialización del OLED (SSD1322 256x64 SPI) */
 bool oled_init();
 
-/** Pantalla de arranque/splash simple */
+/** Splash debug */
 void oled_splash(const char* title);
 
 /** HOME / Dashboard */
 void oled_draw_dashboard(const OwlUiData& d);
 
-/** Detalle de GPS */
+/** GPS detail */
 void oled_draw_gps_detail(const OwlUiData& d);
 
-/** Detalle de Iridium (placeholder) */
+/** Iridium detail (placeholder) */
 void oled_draw_iridium_detail(bool present, int sigLevel, int unread, const String& imei);
 
-/** Configuración del sistema */
+/** System config */
 void oled_draw_sys_config(const OwlUiData& d, bool netReg, bool pdpUp,
                           const String& ip, bool sdOk, bool i2cOk, const char* fw);
 
-/** Bandeja de mensajes */
+/** Messages list */
 void oled_draw_messages(uint16_t unread, const String& last);

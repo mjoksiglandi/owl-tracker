@@ -1,14 +1,18 @@
 #pragma once
 #include <Arduino.h>
 
-// Inicializa el módulo Iridium en el bus I2C
-bool iridium_begin(uint8_t addr = 0x43);
+struct IridiumInfo {
+  bool   present = false;   // Detectado en I2C
+  int    sig     = -1;      // 0..5  (-1 = sin dato)
+  bool   waiting = false;   // ¿hay MT pendiente?
+  String imei    = "";      // IMEI del 9603N
+};
 
-// Actualiza el estado (llamado en loop si se necesita)
+// Inicializa el módem (I2C). Devuelve true si está presente.
+bool iridium_begin();
+
+// Refresco periódico (no bloqueante). Llamar cada 1–5 s.
 void iridium_poll();
 
-// Devuelve el último nivel de señal leído (0..5)
-int iridium_getSignalQuality();
-
-// Devuelve si el módulo está presente
-bool iridium_isPresent();
+// Último estado cacheado.
+IridiumInfo iridium_status();

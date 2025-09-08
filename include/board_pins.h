@@ -4,14 +4,13 @@
 //  LILYGO T-A7670G (R2)
 // =======================
 
-// --- MODEM (A7670G)
+// --- UART del módem (SIMCom A7670G)
 #define PIN_MODEM_TX   26
 #define PIN_MODEM_RX   27
 #define PIN_MODEM_PWR   4
 #define PIN_MODEM_EN   12
-#define MODEM_BAUD     115200
 
-// --- OLED SSD1322 256x64 (VSPI)
+// --- OLED SSD1322 256x64 SPI
 #define PIN_OLED_SCK   18
 #define PIN_OLED_MOSI  23
 #define PIN_OLED_CS     5
@@ -34,25 +33,28 @@
   #define OLED_PIN_RST   PIN_OLED_RST
 #endif
 
-// --- I2C (baro, mag, futuros)
-#define PIN_I2C_SDA    21
-#define PIN_I2C_SCL    22
-#define I2C_FREQ_HZ    400000
-
-// --- SD (HSPI)
-#define PIN_SD_MISO     2
-#define PIN_SD_MOSI    15
-#define PIN_SD_SCK     14
-#define PIN_SD_CS      13
-
-// --- GPS (UART2)
-#define PIN_GPS_TX     -1     // no conectado
-#define PIN_GPS_RX     34     // RX desde GPS
+// --- GPS externo (NMEA por UART2 del ESP32)
+#define PIN_GPS_TX     33    // ESP32 TX -> RX del GPS (opcional)
+#define PIN_GPS_RX     34    // ESP32 RX <- TX del GPS (OBLIGATORIO)
 #define PIN_GPS_PWR    -1
 #define GPS_BAUD       115200
 
-// --- BOTONES (INPUT_PULLUP, activos LOW)
-// ⚠ BTN3 en GPIO12: no presionar durante boot/reset
+// --- I2C (baro/mag/iridium)
+#define PIN_I2C_SDA    21
+#define PIN_I2C_SCL    22
+
+// --- SD (HSPI)
+#define PIN_SD_MOSI    13
+#define PIN_SD_MISO    12
+#define PIN_SD_SCK     14
+#define PIN_SD_CS      15
+
+// --- Botones (pull-up internos)
 #define PIN_BTN1       25
-#define PIN_BTN2       19
-#define PIN_BTN3       12
+#define PIN_BTN2       27
+#define PIN_BTN3       35  // si usas GPIO35 como entrada analógica/solo input, ajusta a tu wiring
+
+// --- Dirección I2C del Qwiic Iridium 9603N
+#ifndef IRIDIUM_I2C_ADDR
+  #define IRIDIUM_I2C_ADDR 0x63
+#endif

@@ -1,51 +1,62 @@
 #include "iridium.h"
 #include <Wire.h>
-#include <IridiumSBD.h>  // SparkFun Iridium I2C library
+#include <IridiumSBD.h>   // SparkFun Iridium 9603N (I2C)
 
-// Dirección I2C por defecto del Qwiic Iridium
-static uint8_t s_addr = 0x43;
-static IridiumSBD *s_isbd = nullptr;
-static bool s_present = false;
-static int s_lastRssi = -1;
+// Instancia I2C del módem (usa TwoWire por defecto: Wire)
+static IridiumSBD irid(Wire);
 
-bool iridium_begin(uint8_t addr) {
-  s_addr = addr;
-  Wire.begin();
-  s_isbd = new IridiumSBD(Wire, s_addr);
+static IridiumInfo  g_info;
+static uint32_t     g_lastPollMs = 0;
 
-  if (!s_isbd) {
-    Serial.println("[Iridium] Error: no se pudo instanciar objeto");
-    return false;
+static bool getIMEI_String(String &out) {
+  char buf[32] = {0};
+  int r = irid.getIMEI(buf, sizeof(buf));          // ISBD_SUCCESS (0) si OK
+  if (r == ISBD_SUCCESS && buf[0] != '\0') {
+    out = String(buf);
+    return true;
   }
+  return false;
+}
 
-  // Power profile por defecto
-  if (s_isbd->begin() != ISBD_SUCCESS) {
-    Serial.println("[Iridium] No responde en I2C");
-    s_present = false;
-    return false;
+bool iridium_begin() {
+  // Asegúrate de que Wire.begin(...) ya fue llamado en setup
+  int r = irid.begin();
+  if (r == ISBD_SUCCESS) {
+    g_info.present = true;
+    (void)getIMEI_String(g_info.imei);
+  } else {
+    g_info = IridiumInfo{}; // limpia estado
   }
-
-  s_present = true;
-  Serial.println("[Iridium] Detectado OK");
-  return true;
+  return g_info.present;
 }
 
 void iridium_poll() {
-  if (!s_present) return;
+  if (!g_info.present) return;
+  uint32_t now = millis();
+  if (now - g_lastPollMs < 2000) return;   // refresco cada ~2 s
+  g_lastPollMs = now;
 
-  int quality = -1;
-  int err = s_isbd->getSignalQuality(quality);
-  if (err == ISBD_SUCCESS) {
-    s_lastRssi = quality; // escala 0..5
-  } else {
-    s_lastRssi = -1;
+  // Señal (0..5)
+  int sig = -1;
+  if (irid.getSignalQuality(sig) == ISBD_SUCCESS) {
+    if (sig < 0) sig = 0;
+    if (sig > 5) sig = 5;
+    g_info.sig = sig;
+  }
+
+  // Cantidad de mensajes MT esperando (retorna int, -ve = error)
+  int mtCount = irid.getWaitingMessageCount();
+  if (mtCount >= 0) {
+    g_info.waiting = (mtCount > 0);
+  }
+
+  // Reintento para IMEI si aún no se obtuvo
+  if (g_info.imei.length() == 0) {
+    String tmp;
+    if (getIMEI_String(tmp)) g_info.imei = tmp;
   }
 }
 
-int iridium_getSignalQuality() {
-  return s_lastRssi;
-}
-
-bool iridium_isPresent() {
-  return s_present;
+IridiumInfo iridium_status() {
+  return g_info;
 }
