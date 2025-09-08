@@ -15,10 +15,10 @@
 // Sensores / UI
 #include "oled_display.h"
 #include "gps.h"
-#include "mag.h"
 #include "ui_state.h"
 #include "buttons.h"
 #include "iridium.h"
+#include "mag.h"          // ← MAG se queda
 
 // BLE
 #include "ble.h"
@@ -36,8 +36,9 @@ OwlHttpClient http;
 SPIClass hspi(HSPI);
 
 // Estado global
-static bool sd_ok     = false;
-static bool g_mag_ok  = false;
+static bool sd_ok      = false;
+static bool g_mag_ok   = false;
+static bool ble_ok     = false;
 
 static volatile bool g_net_registered = false;
 static volatile bool g_pdp_up        = false;
@@ -51,9 +52,6 @@ static inline void LOGF(const char* fmt, ...) {
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
   Serial.println(buf);
-}
-static inline int clamp_int(int v, int lo, int hi) {
-  return v < lo ? lo : (v > hi ? hi : v);
 }
 
 // SD helpers (HSPI)
@@ -74,7 +72,7 @@ static void sd_logln(const String& line) {
   if (f) { f.println(line); f.close(); }
 }
 
-// I2C seguro
+// I2C
 static void i2c_init_safe() {
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 400000);
   Wire.setTimeOut(20);
@@ -184,12 +182,12 @@ void setup() {
   // RF: Wi-Fi OFF (BLE queda activo)
   WiFi.mode(WIFI_OFF);
 
-  // OLED primero
+  // OLED primero (feedback inmediato)
   oled_init();
   oled_splash("Owl Tracker");
   delay(400);
 
-  // 👉 Primer HOME “en vacío” para confirmar vida
+  // HOME “en vacío” para confirmar vida
   {
     OwlUiData bootUi;
     bootUi.csq = 99;
@@ -213,14 +211,18 @@ void setup() {
   gps_begin_uart(SerialGPS, PIN_GPS_RX, PIN_GPS_TX, GPS_BAUD);
   gps_set_stale_timeout(10000);
 
-  // I2C + detección baro/mag
+  // I2C
   i2c_init_safe();
-  // if (i2c_probe(0x76) || i2c_probe(0x77)) g_baro_ok = baro_begin();
-  // else LOG("[I2C] MS5611 no detectado");
-  if (i2c_probe(0x0E)) g_mag_ok = mag_begin();
-  else LOG("[I2C] IST8310 no detectado");
 
-  // **Iridium por I2C** (solo si hay ACK en el bus @0x63)
+  // MAG (IST8310 en 0x0E)
+  if (i2c_probe(0x0E)) {
+    g_mag_ok = mag_begin();
+    LOGF("[I2C] MAG %s", g_mag_ok ? "OK" : "NO");
+  } else {
+    LOG("[I2C] IST8310 no detectado");
+  }
+
+  // **Iridium por I2C** (solo si hay ACK @0x63)
   bool ir_ok = false;
   if (i2c_probe(IRIDIUM_I2C_ADDR)) {
     ir_ok = iridium_begin();
@@ -234,8 +236,8 @@ void setup() {
   LOGF("[Owl] SD %s", sd_ok ? "OK" : "NO");
 
   // BLE
-  if (ble_begin("OwlTracker")) LOG("[BLE] advertising");
-  else LOG("[BLE] init fail");
+  ble_ok = ble_begin("OwlTracker");
+  LOGF("[BLE] %s", ble_ok ? "advertising" : "init fail");
 
   // Tarea de red
   xTaskCreatePinnedToCore(net_task, "net_task", 4096, nullptr, 1, nullptr, 0);
@@ -245,7 +247,6 @@ void setup() {
 void loop() {
   // Sensores no bloqueantes
   gps_poll(SerialGPS);
-  // if (g_baro_ok) baro_poll();
   if (g_mag_ok)  mag_poll();
 
   // Iridium no bloqueante
@@ -274,8 +275,7 @@ void loop() {
   if (millis() - t_ui >= 1000) {
     t_ui = millis();
 
-    GpsFix   fx = gps_last_fix();
-    // BaroData bd = baro_last();
+    GpsFix      fx = gps_last_fix();
     IridiumInfo ir = iridium_status();
 
     OwlUiData ui;
@@ -288,8 +288,8 @@ void loop() {
     ui.pdop         = fx.pdop;
     ui.speed_mps    = fx.speed_mps;
     ui.course_deg   = fx.course_deg;
-    // ui.pressure_hpa = bd.pressure_hpa;
-    ui.msgRx        = ir.waiting ? 1 : 0;           // placeholder: 1 si hay mensaje esperando
+    ui.pressure_hpa = NAN;                           // baro removido
+    ui.msgRx        = ir.waiting ? 1 : 0;            // 1 si hay MT en red
     ui.utc          = fx.utc.length() ? (fx.utc + "Z") : String("");
 
     // BLE snapshot
@@ -309,18 +309,28 @@ void loop() {
     bool needRedraw = (g_screen != lastScreen) || changed(ui, last);
     if (needRedraw) {
       switch (g_screen) {
-        case UiScreen::HOME:           oled_draw_dashboard(ui); break;
-        case UiScreen::GPS_DETAIL:     oled_draw_gps_detail(ui); break;
-        case UiScreen::IRIDIUM_DETAIL: {
+        case UiScreen::HOME:
+          oled_draw_dashboard(ui);
+          break;
+
+        case UiScreen::GPS_DETAIL:
+          oled_draw_gps_detail(ui);
+          break;
+
+        case UiScreen::IRIDIUM_DETAIL:
           oled_draw_iridium_detail(ir.present, ir.sig, ir.waiting ? 1 : 0, ir.imei);
-        } break;
+          break;
+
         case UiScreen::SYS_CONFIG: {
           const String ipStr = modem.localIP().toString();
-          const bool   i2cOk = (g_mag_ok || g_mag_ok);
-          const char*  fwStr = "fw 1.0.0";
-          oled_draw_sys_config(ui, g_net_registered, g_pdp_up, ipStr, sd_ok, i2cOk, fwStr);
+          const bool   i2cOk = (g_mag_ok || ir.present);          // I2C OK si MAG o IR presentes
+          String fwStr = String("fw 1.0.0 ") + (ble_ok ? "BLE:OK" : "BLE:NO");  // ← estado BLE
+          oled_draw_sys_config(ui, g_net_registered, g_pdp_up, ipStr, sd_ok, i2cOk, fwStr.c_str());
         } break;
-        case UiScreen::MESSAGES:       oled_draw_messages(ir.waiting ? 1 : 0, ""); break;
+
+        case UiScreen::MESSAGES:
+          oled_draw_messages(ir.waiting ? 1 : 0, "");
+          break;
       }
       last = ui;
       lastScreen = g_screen;
