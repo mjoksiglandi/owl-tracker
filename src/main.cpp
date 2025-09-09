@@ -18,10 +18,11 @@
 #include "ui_state.h"
 #include "buttons.h"
 #include "iridium.h"
-#include "mag.h"          // ← MAG se queda
+#include "mag.h"
 
-// BLE
+// BLE + Reporte
 #include "ble.h"
+#include "report.h"
 
 // FreeRTOS
 #include "freertos/FreeRTOS.h"
@@ -41,7 +42,11 @@ static bool g_mag_ok   = false;
 static bool ble_ok     = false;
 
 static volatile bool g_net_registered = false;
-static volatile bool g_pdp_up        = false;
+static volatile bool g_pdp_up         = false;
+
+// IMEI GSM (cache) y tipo de reporte “one-shot”
+static String g_gsm_imei = "";
+static int    g_next_report_type = 1;   // 1=Normal, 2=Emergencia, 3=Libre, 4=POI
 
 // Utils
 static inline void LOG(const char* s){ if (Serial) Serial.println(s); }
@@ -54,7 +59,7 @@ static inline void LOGF(const char* fmt, ...) {
   Serial.println(buf);
 }
 
-// SD helpers (HSPI)
+// ===================== SD helpers (HSPI) =====================
 static bool sd_begin_hspi() {
   hspi.end();
   hspi.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
@@ -72,7 +77,7 @@ static void sd_logln(const String& line) {
   if (f) { f.println(line); f.close(); }
 }
 
-// I2C
+// ===================== I2C seguro ============================
 static void i2c_init_safe() {
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 400000);
   Wire.setTimeOut(20);
@@ -83,7 +88,7 @@ static bool i2c_probe(uint8_t addr) {
   return (e == 0);
 }
 
-// Tarea red con backoff
+// ===================== Red (tarea) ===========================
 static void net_task(void* arg) {
   enum class NState { ST_POWER, ST_AT_PROBE, ST_SET_LTE, ST_REG_WAIT, ST_PDP_UP, ST_RUN, ST_SLEEP };
   NState st = NState::ST_POWER;
@@ -154,18 +159,20 @@ static void net_task(void* arg) {
   }
 }
 
-// Acciones UI
+// ===================== Acciones UI ===========================
 static void save_poi() {
   GpsFix fx = gps_last_fix();
   if (!fx.valid) { LOG("[Owl] POI cancelado: sin fix"); return; }
   String s = "POI," + fx.utc + "," + String(fx.lat,6) + "," + String(fx.lon,6) + "," + String(fx.alt,1);
   LOG(("[Owl] " + s).c_str()); sd_logln(s);
+  g_next_report_type = 4; // POI
 }
 static void sos_trigger() {
   LOG("[Owl] SOS TRIGGERED!"); sd_logln(String("SOS,") + String(millis()));
+  g_next_report_type = 2; // Emergencia
 }
 
-// Pantallas
+// ===================== Pantallas =============================
 static UiScreen g_screen = UiScreen::HOME;
 static void next_screen() {
   uint8_t v = static_cast<uint8_t>(g_screen);
@@ -173,13 +180,13 @@ static void next_screen() {
   g_screen = static_cast<UiScreen>(v);
 }
 
-// SETUP
+// ===================== SETUP =================================
 void setup() {
   Serial.begin(115200);
   delay(50);
   LOG("\n[Owl] Boot");
 
-  // RF: Wi-Fi OFF (BLE queda activo)
+  // RF: solo BLE (Wi-Fi OFF)
   WiFi.mode(WIFI_OFF);
 
   // OLED primero (feedback inmediato)
@@ -243,7 +250,7 @@ void setup() {
   xTaskCreatePinnedToCore(net_task, "net_task", 4096, nullptr, 1, nullptr, 0);
 }
 
-// LOOP
+// ===================== LOOP =================================
 void loop() {
   // Sensores no bloqueantes
   gps_poll(SerialGPS);
@@ -270,7 +277,7 @@ void loop() {
     if (auto e3 = btn3_get(); e3.longPress) { sos_trigger(); }
   }
 
-  // UI (1 Hz) con redraw condicional
+  // UI (1 Hz) con redraw condicional + BLE report
   static uint32_t t_ui = 0;
   if (millis() - t_ui >= 1000) {
     t_ui = millis();
@@ -278,6 +285,7 @@ void loop() {
     GpsFix      fx = gps_last_fix();
     IridiumInfo ir = iridium_status();
 
+    // ------- UI data -------
     OwlUiData ui;
     ui.csq          = modem.getSignalQuality();
     ui.iridiumLvl   = (ir.sig >= 0) ? ir.sig : -1;   // 0..5 o -1
@@ -292,10 +300,31 @@ void loop() {
     ui.msgRx        = ir.waiting ? 1 : 0;            // 1 si hay MT en red
     ui.utc          = fx.utc.length() ? (fx.utc + "Z") : String("");
 
-    // BLE snapshot
-    ble_update(ui);
+    // ------- IMEI prioritario GSM (cachea una vez) -------
+    if (g_gsm_imei.length() == 0 && g_net_registered) {
+      String imeiTry = modem.getIMEI();
+      if (imeiTry.length() > 0) g_gsm_imei = imeiTry;
+    }
 
-    // redraw si cambió o cambió de pantalla
+    // ------- Reporte BLE JSON unificado -------
+    OwlReport rpt;
+    rpt.tipoReporte = g_next_report_type;  // 1 normal salvo eventos
+
+    if (g_gsm_imei.length()) rpt.IMEI = g_gsm_imei;
+    else if (ir.imei.length()) rpt.IMEI = ir.imei;
+    else rpt.IMEI = "";
+
+    rpt.latitud   = fx.valid ? fx.lat : NAN;
+    rpt.longitud  = fx.valid ? fx.lon : NAN;
+    rpt.altitud   = fx.valid ? fx.alt : NAN;
+    rpt.rumbo     = fx.course_deg;
+    rpt.velocidad = fx.speed_mps;
+    rpt.fechaHora = fx.utc.length() ? (fx.utc + "Z") : String("");
+
+    ble_update(rpt);           // ← Envío por BLE con el formato requerido
+    g_next_report_type = 1;    // consumir y volver a Normal
+
+    // ------- Render OLED si cambió -------
     static UiScreen lastScreen = UiScreen::HOME;
     static OwlUiData last = {};
     auto neq = [](double x, double y, double eps){ return !(fabs(x-y) <= eps); };
@@ -323,8 +352,8 @@ void loop() {
 
         case UiScreen::SYS_CONFIG: {
           const String ipStr = modem.localIP().toString();
-          const bool   i2cOk = (g_mag_ok || ir.present);          // I2C OK si MAG o IR presentes
-          String fwStr = String("fw 1.0.0 ") + (ble_ok ? "BLE:OK" : "BLE:NO");  // ← estado BLE
+          const bool   i2cOk = (g_mag_ok || ir.present);           // I2C OK si MAG o IR presentes
+          String fwStr = String("fw 1.0.0 ") + (ble_ok ? "BLE:OK" : "BLE:NO");
           oled_draw_sys_config(ui, g_net_registered, g_pdp_up, ipStr, sd_ok, i2cOk, fwStr.c_str());
         } break;
 

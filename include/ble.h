@@ -1,13 +1,11 @@
 #pragma once
 #include <Arduino.h>
-#include "oled_display.h"  // para OwlUiData
+#include "report.h"
 
-// Inicializa BLE (NimBLE). Devuelve true si quedó anunciado.
-bool ble_begin(const char* devName = "OwlTracker");
+bool ble_begin(const char* devName);
 
-// Actualiza características de estado desde un snapshot de UI.
-// Llamar ~1 Hz o cuando cambien datos relevantes.
-void ble_update(const OwlUiData& ui);
+// Publica el estado por BLE en formato JSON (según OwlReport)
+void ble_update(const OwlReport& rpt);
 
-// Poll liviano (opcional por si agregas lógica futura de RX)
+// Poll no-bloqueante para futuras RX/comandos
 void ble_poll();
