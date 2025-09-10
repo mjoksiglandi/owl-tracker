@@ -62,7 +62,8 @@ static String fmtAlt(double a){
 static String fmtUtc(const String& s){ return s.length() ? s : String("--:--:--Z"); }
 static String fmtSpeed(float mps){
   if (!isfinitef(mps)) return "SPD: --.-";
-  char b[24]; snprintf(b, sizeof(b), "SPD: %.1f m/s", mps);
+  float kt = mps * 1.943844f; // m/s -> knots
+  char b[24]; snprintf(b, sizeof(b), "SPD: %.1f kt", kt);
   return String(b);
 }
 static String fmtTrackDeg(float deg){
@@ -163,7 +164,7 @@ void oled_draw_dashboard(const OwlUiData& d){
   u8g2.drawStr(256 - 6 - wSpd, 42, sSpd.c_str());
 
   // Separador fino encima de la franja inferior
-  u8g2.drawHLine(0, 58, 256);
+  u8g2.drawHLine(0, 50, 256);
 
   // BOTTOM: UTC centrado
   String sUtc = fmtUtc(d.utc);
