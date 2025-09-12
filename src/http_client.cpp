@@ -1,34 +1,53 @@
-#include <Arduino.h>
-#include <TinyGsmClient.h>     // asegura la declaración de TinyGsmClient[Secure]
+#include <ArduinoHttpClient.h>
 #include "http_client.h"
 
-bool OwlHttpClient::begin(TinyGsm& modem, const char* host, uint16_t port, const char* path) {
-    _cli = new TinyGsmClient(modem);   // 👈 cambio aquí
-    _host = host;
-    _port = port;
-    _path = path;
-    return true;
+// Suponiendo que dentro de OwlHttpClient tienes:
+//   TinyGsmClient* client_;
+//   String host_;
+//   uint16_t port_;
+// y que begin(...) inicializa esos campos.
+
+static void addAuth(HttpClient& http, const char* bearer) {
+  if (bearer && bearer[0]) {
+    http.sendHeader("Authorization", bearer);
+  }
 }
 
-bool OwlHttpClient::get() {
-    if (!_cli->connect(_host.c_str(), _port)) {
-        Serial.println("[Owl] ❌ No se pudo conectar al servidor");
-        return false;
-    }
+// PUT JSON
+int OwlHttpClient::putJson(const char* path, const char* jsonBody, const char* bearer) {
+  HttpClient http(*client_, host_.c_str(), port_);
+  http.beginRequest();
+  http.put(path);
+  http.sendHeader("Content-Type", "application/json");
+  http.sendHeader("Connection", "close");
+  addAuth(http, bearer);
+  http.sendHeader("Content-Length", (int)strlen(jsonBody));
+  http.beginBody();
+  http.print(jsonBody);
+  http.endRequest();
 
-    _cli->print(String("GET ") + _path + " HTTP/1.1\r\n" +
-                "Host: " + _host + "\r\n" +
-                "Connection: close\r\n\r\n");
+  int status = http.responseStatusCode();
+  // Puedes leer respuesta si te interesa:
+  // String resp = http.responseBody();
+  http.stop();
+  return status;
+}
 
-    unsigned long timeout = millis();
-    while (_cli->connected() && millis() - timeout < 10000L) {
-        while (_cli->available()) {
-            String line = _cli->readStringUntil('\n');
-            Serial.println(line);
-            timeout = millis();
-        }
-    }
+// POST JSON (por si lo quieres usar también)
+int OwlHttpClient::postJson(const char* path, const char* jsonBody, const char* bearer) {
+  HttpClient http(*client_, host_.c_str(), port_);
+  http.beginRequest();
+  http.post(path);
+  http.sendHeader("Content-Type", "application/json");
+  http.sendHeader("Connection", "close");
+  addAuth(http, bearer);
+  http.sendHeader("Content-Length", (int)strlen(jsonBody));
+  http.beginBody();
+  http.print(jsonBody);
+  http.endRequest();
 
-    _cli->stop();
-    return true;
+  int status = http.responseStatusCode();
+  // String resp = http.responseBody();
+  http.stop();
+  return status;
 }

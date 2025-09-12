@@ -1,56 +1,116 @@
-#include "iridium.h"
+#include <Arduino.h>
 #include <Wire.h>
-#include <IridiumSBD.h>
+#include <IridiumSBD.h>   // SparkFun_IridiumSBD_I2C_Arduino_Library
+#include "iridium.h"
 
-static IridiumSBD irid(Wire);
-static IridiumInfo g_info;
-static uint32_t    g_lastPollMs = 0;
+// Estado
+static uint8_t   s_addr    = IRIDIUM_I2C_ADDR;
+static bool      s_present = false;
+static String    s_imei    = "";
+static int       s_sig     = -1;
+static bool      s_waiting = false;
 
-bool iridium_begin() {
-  int r = irid.begin();
-  if (r == ISBD_SUCCESS) {
-    g_info.present = true;
+// Instancia como puntero para evitar copia/assign
+static IridiumSBD* s_irid = nullptr;
 
-    // leer IMEI al arranque, aunque no haya red
-    char buf[32] = {0};
-    if (irid.getIMEI(buf, sizeof(buf)) == ISBD_SUCCESS) {
-      g_info.imei = String(buf);
-    } else {
-      g_info.imei = String("NO_IMEI");
-    }
-  } else {
-    g_info = IridiumInfo{}; // limpio
-  }
-  return g_info.present;
+static uint32_t t_lastSig  = 0;
+static uint32_t t_lastWait = 0;
+static const uint32_t PERIOD_SIG_MS  = 2000;
+static const uint32_t PERIOD_WAIT_MS = 3000;
+
+static bool i2c_check_ack(uint8_t addr) {
+  Wire.beginTransmission(addr);
+  return (Wire.endTransmission() == 0);
 }
 
-void iridium_poll() {
-  if (!g_info.present) return;
+bool iridium_begin(uint8_t i2c_addr)
+{
+  s_addr = i2c_addr;
+
+  if (!i2c_check_ack(s_addr)) {
+    s_present = false;
+    s_imei    = "";
+    s_sig     = -1;
+    s_waiting = false;
+    if (s_irid) { delete s_irid; s_irid = nullptr; }
+    return false;
+  }
+
+  if (s_irid) { delete s_irid; s_irid = nullptr; }
+  // Fuerza constructor I2C (uint8_t) para evitar ambigüedad
+  s_irid = new IridiumSBD(Wire, (uint8_t)s_addr);
+
+  int r = s_irid->begin();
+  if (r != ISBD_SUCCESS) {
+    s_present = false;
+    s_imei = ""; s_sig = -1; s_waiting = false;
+    return false;
+  }
+
+  char buf[32] = {0};
+  if (s_irid->getIMEI(buf, sizeof(buf)) == ISBD_SUCCESS) s_imei = String(buf);
+  else s_imei = "";
+
+  int s = -1;
+  if (s_irid->getSignalQuality(s) == ISBD_SUCCESS) s_sig = s; else s_sig = -1;
+
+  int mt = s_irid->getWaitingMessageCount();   // sin args en lib SparkFun
+  s_waiting = (mt > 0);
+
+  s_present = true;
+  t_lastSig = t_lastWait = millis();
+  return true;
+}
+
+void iridium_poll()
+{
+  if (!s_present || !s_irid) return;
+
   uint32_t now = millis();
-  if (now - g_lastPollMs < 2000) return;
-  g_lastPollMs = now;
 
-  // Señal (0..5), -1 si falla
-  int sig = -1;
-  if (irid.getSignalQuality(sig) == ISBD_SUCCESS) {
-    g_info.sig = constrain(sig, 0, 5);
-  } else {
-    g_info.sig = -1;
+  if (now - t_lastSig >= PERIOD_SIG_MS) {
+    t_lastSig = now;
+    int s = -1;
+    if (s_irid->getSignalQuality(s) == ISBD_SUCCESS) s_sig = s;
   }
 
-  // Mensajes esperando
-  int mtCount = irid.getWaitingMessageCount();
-  g_info.waiting = (mtCount > 0);
-
-  // Si no tenemos IMEI aún, reintenta
-  if (g_info.imei.length() == 0 || g_info.imei == "NO_IMEI") {
-    char buf[32] = {0};
-    if (irid.getIMEI(buf, sizeof(buf)) == ISBD_SUCCESS) {
-      g_info.imei = String(buf);
-    }
+  if (now - t_lastWait >= PERIOD_WAIT_MS) {
+    t_lastWait = now;
+    int mt = s_irid->getWaitingMessageCount();
+    s_waiting = (mt > 0);
   }
 }
 
-IridiumInfo iridium_status() {
-  return g_info;
+IridiumInfo iridium_status()
+{
+  IridiumInfo info;
+  info.present = s_present;
+  info.sig     = s_sig;
+  info.waiting = s_waiting;
+  info.imei    = s_imei;
+  return info;
 }
+
+// --------- TX/RX de mensajes (texto) ---------
+
+bool iridium_send_cipher_b64(const String& cipher)
+{
+  if (!s_present || !s_irid) return false;
+  if (cipher.length() > 270)  return false;   // margen para 9603N
+  int r = s_irid->sendSBDText(cipher.c_str());
+  return (r == ISBD_SUCCESS);
+}
+
+bool iridium_fetch_next(String& outCipher)
+{
+  outCipher = "";
+  if (!s_present || !s_irid) return false;
+
+  // La lib SparkFun_IridiumSBD_I2C no expone readSBDText().
+  // Mantendremos la bandeja como "pendiente" hasta que integremos la lectura MT específica.
+  // Por ahora, sólo consultamos el contador y devolvemos false (no leído).
+  int mt = s_irid->getWaitingMessageCount();
+  s_waiting = (mt > 0);
+  return false;
+}
+
