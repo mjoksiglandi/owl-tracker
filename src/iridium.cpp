@@ -1,6 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <IridiumSBD.h>   // SparkFun_IridiumSBD_I2C_Arduino_Library
+#include <IridiumSBD.h>   // SparkFun_IridiumSBD_I2C
 #include "iridium.h"
 
 // Estado
@@ -10,10 +10,8 @@ static String     s_imei    = "";
 static int        s_sig     = -1;
 static bool       s_waiting = false;
 
-// Instancia como puntero para evitar copia/assign prohibidos por la lib
 static IridiumSBD* s_irid   = nullptr;
 
-// Periodicidad de sondeos
 static uint32_t t_lastSig  = 0;
 static uint32_t t_lastWait = 0;
 static const uint32_t PERIOD_SIG_MS  = 2000;
@@ -53,7 +51,7 @@ bool iridium_begin(uint8_t i2c_addr)
   if (s_irid->getSignalQuality(s) == ISBD_SUCCESS) s_sig = s; else s_sig = -1;
 
   // Pendientes
-  int mt = s_irid->getWaitingMessageCount(); // API I2C: sin args
+  int mt = s_irid->getWaitingMessageCount();
   s_waiting = (mt > 0);
 
   s_present = true;
@@ -89,21 +87,20 @@ IridiumInfo iridium_status()
   return info;
 }
 
-// TX (texto). Enviamos el Base64 (o prefijo gcm://...) tal cual.
 bool iridium_send_cipher_b64(const String& cipher)
 {
   if (!s_present || !s_irid) return false;
-  if (cipher.length() > 270)  return false;  // límite seguro para 9603N
+  if (cipher.length() > (int)IRIDIUM_MAX_TX) return false; // ≤270
   int r = s_irid->sendSBDText(cipher.c_str());
   return (r == ISBD_SUCCESS);
 }
 
-// RX (stub): la lib I2C no ofrece readSBDText(); dejamos sólo el contador.
+// RX (stub por limitación de API I2C)
 bool iridium_fetch_next(String& outCipher)
 {
   outCipher = "";
   if (!s_present || !s_irid) return false;
   int mt = s_irid->getWaitingMessageCount();
   s_waiting = (mt > 0);
-  return false;   // no descargamos (pendiente integrar flujo MT real)
+  return false;
 }

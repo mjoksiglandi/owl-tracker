@@ -1,9 +1,37 @@
-#include <ArduinoHttpClient.h>
 #include "http_client.h"
+#include <cstring>   // strlen
 
-// Lee la primera línea "HTTP/1.1 200 OK"
-static int parse_status_line(Stream& s) {
-  String line = s.readStringUntil('\n');  // respeta timeout del cliente
+// ==================== CTOR / BEGIN / GETTERS ====================
+OwlHttpClient::OwlHttpClient(TinyGsm& /*modem*/,
+                             TinyGsmClient& client,
+                             const String& host,
+                             uint16_t port)
+: client_h(client), _host(host), _port(port)
+{
+}
+
+void OwlHttpClient::begin(TinyGsm& /*modem*/,
+                          const char* host,
+                          uint16_t port,
+                          const char* /*root_ca*/)
+{
+  _host = (host ? host : "");
+  _port = port;
+}
+
+TinyGsmClient& OwlHttpClient::client()       { return client_h; }
+const String&  OwlHttpClient::host() const   { return _host; }
+uint16_t       OwlHttpClient::port() const   { return _port; }
+
+// ==================== HELPERS INTERNOS ====================
+static int parse_status_line(Stream& s, uint32_t timeout_ms = 3000) {
+  // Espera datos iniciales (hasta timeout)
+  uint32_t t0 = millis();
+  while (!s.available() && (millis() - t0 < timeout_ms)) { delay(1); }
+  if (!s.available()) return -1;
+
+  // Primera línea: "HTTP/1.1 200 OK\r\n"
+  String line = s.readStringUntil('\n'); // respeta timeout del cliente
   int sp1 = line.indexOf(' ');
   if (sp1 < 0) return -1;
   int sp2 = line.indexOf(' ', sp1 + 1);
@@ -11,64 +39,72 @@ static int parse_status_line(Stream& s) {
   return line.substring(sp1 + 1, sp2).toInt();
 }
 
-int OwlHttpClient::putJson(const char* path, const char* jsonBody, const char* bearer) {
-  if (!client_h.connect(_host.c_str(), _port)) return -1;
-
-  client_h.print("PUT ");
-  client_h.print(path);
-  client_h.print(" HTTP/1.1\r\nHost: ");
-  client_h.print(_host);
-  client_h.print("\r\nConnection: close\r\nContent-Type: application/json\r\n");
-
-  if (bearer && bearer[0]) {
-    client_h.print("Authorization: ");
-    client_h.print(bearer);
-    client_h.print("\r\n");
-  }
-
-  client_h.print("Content-Length: ");
-  client_h.print((int)strlen(jsonBody));
-  client_h.print("\r\n\r\n");
-  client_h.print(jsonBody);
-
-  int code = parse_status_line(client_h);
-
+static void flush_and_close(Client& c, uint32_t timeout_ms = 5000) {
   uint32_t t0 = millis();
-  while ((client_h.connected() || client_h.available()) && (millis() - t0 < 5000)) {
-    while (client_h.available()) client_h.read();
+  while ((c.connected() || c.available()) && (millis() - t0 < timeout_ms)) {
+    while (c.available()) c.read();
     delay(1);
   }
-  client_h.stop();
+  c.stop();
+}
+
+// ==================== PUT / POST JSON ====================
+int OwlHttpClient::putJson(const char* path,
+                           const char* jsonBody,
+                           const char* bearer)
+{
+  auto& cl = client();
+  if (!cl.connect(host().c_str(), port())) return -1;
+
+  cl.print("PUT ");
+  cl.print(path ? path : "/");
+  cl.print(" HTTP/1.1\r\nHost: ");
+  cl.print(host());
+  cl.print("\r\nConnection: close\r\nContent-Type: application/json\r\n");
+
+  if (bearer && bearer[0]) {
+    cl.print("Authorization: ");
+    cl.print(bearer);
+    cl.print("\r\n");
+  }
+
+  cl.print("Content-Length: ");
+  cl.print((int)strlen(jsonBody ? jsonBody : ""));
+  cl.print("\r\n\r\n");
+
+  if (jsonBody) cl.print(jsonBody);
+
+  int code = parse_status_line(cl);
+  flush_and_close(cl);
   return code;
 }
 
-int OwlHttpClient::postJson(const char* path, const char* jsonBody, const char* bearer) {
-  if (!client_h.connect(_host.c_str(), _port)) return -1;
+int OwlHttpClient::postJson(const char* path,
+                            const char* jsonBody,
+                            const char* bearer)
+{
+  auto& cl = client();
+  if (!cl.connect(host().c_str(), port())) return -1;
 
-  client_h.print("POST ");
-  client_h.print(path);
-  client_h.print(" HTTP/1.1\r\nHost: ");
-  client_h.print(_host);
-  client_h.print("\r\nConnection: close\r\nContent-Type: application/json\r\n");
+  cl.print("POST ");
+  cl.print(path ? path : "/");
+  cl.print(" HTTP/1.1\r\nHost: ");
+  cl.print(host());
+  cl.print("\r\nConnection: close\r\nContent-Type: application/json\r\n");
 
   if (bearer && bearer[0]) {
-    client_h.print("Authorization: ");
-    client_h.print(bearer);
-    client_h.print("\r\n");
+    cl.print("Authorization: ");
+    cl.print(bearer);
+    cl.print("\r\n");
   }
 
-  client_h.print("Content-Length: ");
-  client_h.print((int)strlen(jsonBody));
-  client_h.print("\r\n\r\n");
-  client_h.print(jsonBody);
+  cl.print("Content-Length: ");
+  cl.print((int)strlen(jsonBody ? jsonBody : ""));
+  cl.print("\r\n\r\n");
 
-  int code = parse_status_line(client_h);
+  if (jsonBody) cl.print(jsonBody);
 
-  uint32_t t0 = millis();
-  while ((client_h.connected() || client_h.available()) && (millis() - t0 < 5000)) {
-    while (client_h.available()) client_h.read();
-    delay(1);
-  }
-  client_h.stop();
+  int code = parse_status_line(cl);
+  flush_and_close(cl);
   return code;
 }
