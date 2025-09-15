@@ -7,13 +7,14 @@
 #include <TinyGsmClient.h>
 
 class OwlHttpClient {
-    // Agrega estas declaraciones dentro de la clase OwlHttpClient:
-int putJson(const char* path, const char* jsonBody, const char* bearer = nullptr);
-int postJson(const char* path, const char* jsonBody, const char* bearer = nullptr);
+
 
 public:
     bool begin(TinyGsm& modem, const char* host, uint16_t port, const char* path);
     bool get();
+        // Agrega estas declaraciones dentro de la clase OwlHttpClient:
+int putJson(const char* path, const char* jsonBody, const char* bearer = nullptr);
+int postJson(const char* path, const char* jsonBody, const char* bearer = nullptr);
 private:
     TinyGsmClient* _cli;
     String _host;

@@ -5,18 +5,18 @@
 #include "iridium.h"
 #include "crypto.h"
 #include "inbox.h"
-#include "report.h"   // <-- TU OwlReport
+#include "report.h"   // TU OwlReport
 
-// Políticas de envío para modo de prueba
+// Modo de operación para pruebas
 enum class CommsMode : uint8_t {
-  AUTO = 0,   // Prioridad GSM; si cae -> Iridium; reintenta volver a GSM
+  AUTO = 0,   // GSM prioritario; fallback Iridium; intenta volver a GSM
   GSM_ONLY,
   IR_ONLY,
   BOTH
 };
 
 struct CommsStatus {
-  bool gsm_ready = false;  // PDP ok
+  bool gsm_ready = false;  // PDP OK
   bool ir_present = false;
   int  ir_rssi   = -1;     // 0..5
   bool ble_link  = false;
@@ -31,6 +31,6 @@ bool        comms_send_report(const OwlReport& rpt);
 void        comms_poll();
 CommsStatus comms_status();
 
-// helpers de empaquetado
+// helpers
 String make_report_json(const OwlReport& rpt);
 String make_report_cipher_b64(const OwlReport& rpt);

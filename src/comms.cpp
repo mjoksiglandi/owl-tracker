@@ -1,15 +1,13 @@
 #include "comms.h"
 #include "net_config.h"
 #include "modem_config.h"
-
 #include <TinyGsmClient.h>
 
-// Traemos las instancias globales que declaraste en main.cpp
+// Instancias globales (definidas en main.cpp)
 extern TinyGsm modem;
 extern OwlHttpClient http;
 
-// ------------------------------------------------------------------
-// Helpers modem locales (evitan depender de tu net_task)
+// -------- Helpers modem locales --------
 static inline bool modem_is_registered() {
   return modem.isNetworkConnected();
 }
@@ -24,8 +22,7 @@ static inline bool modem_try_pdp(const char* apn, const char* user, const char* 
   return modem.gprsConnect(apn, user, pass);
 }
 
-// ------------------------------------------------------------------
-
+// -------- Estado Comms --------
 static CommsMode   g_mode = CommsMode::AUTO;
 static CommsStatus g_stat;
 
@@ -33,7 +30,7 @@ static uint32_t t_gsm_chk = 0;
 static uint32_t t_ir_chk  = 0;
 static uint32_t t_ble_hb  = 0;
 
-// --- JSON claro común ---
+// -------- Formatos --------
 String make_report_json(const OwlReport& r) {
   char buf[320];
   snprintf(buf, sizeof(buf),
@@ -45,17 +42,14 @@ String make_report_json(const OwlReport& r) {
   return String(buf);
 }
 
-// --- Cifrado GCM -> Base64 (usa tu crypto.cpp) ---
 String make_report_cipher_b64(const OwlReport& r) {
   extern const uint8_t OWL_AES256_KEY[32];
   extern const size_t  OWL_GCM_IV_LEN; // 12
   String plain = make_report_json(r);
-  // IV aleatorio interno en crypto.cpp si pasas ivLen=0 (según tu implementación);
-  // Si tu crypto exige IV explícito, genera aquí y pásalo.
   return owl_encrypt_aes256gcm_base64(
     OWL_AES256_KEY,
     (const uint8_t*)plain.c_str(), plain.length(),
-    nullptr, 0
+    nullptr, 0   // IV interno (ajusta si tu crypto exige IV explícito)
   );
 }
 
@@ -64,34 +58,28 @@ void comms_begin() {
   g_stat.mode = g_mode;
 }
 
-void comms_set_mode(CommsMode m) {
-  g_mode = m;
-  g_stat.mode = m;
-}
+void comms_set_mode(CommsMode m) { g_mode = m; g_stat.mode = m; }
+CommsMode comms_get_mode()       { return g_mode; }
 
-CommsMode comms_get_mode() { return g_mode; }
-
-// GSM (HTTP PUT con JSON { "data": "<gcm://...>" })
+// -------- Canales --------
 static bool send_via_gsm(const String& payloadCipher) {
   if (!modem_is_pdp_up()) return false;
+  // Enviamos JSON { "data": "<base64>" } vía PUT al PATH
   String body = String("{\"data\":\"") + payloadCipher + "\"}";
   int code = http.putJson(netcfg::PATH, body.c_str(), netcfg::AUTH_BEARER);
   return (code >= 200 && code < 300);
 }
 
-// Iridium (SBD texto con la misma cadena gcm://...)
 static bool send_via_iridium(const String& payloadCipher) {
   return iridium_send_cipher_b64(payloadCipher);
 }
 
-// BLE (notify si hay central conectada)
 static void notify_via_ble(const String& payloadCipher) {
   ble_notify_report_json(payloadCipher);
 }
 
 bool comms_send_report(const OwlReport& rpt) {
   String cipher = make_report_cipher_b64(rpt);
-
   bool ok_gsm=false, ok_ir=false;
 
   switch (g_mode) {
@@ -131,7 +119,7 @@ void comms_poll() {
     g_stat.gsm_ready = modem_is_pdp_up();
   }
 
-  // Iridium check + descarga (2~3 s)
+  // Iridium check + ingest (2~3 s)
   if (millis() - t_ir_chk > 2000) {
     t_ir_chk = millis();
     IridiumInfo ir = iridium_status();
@@ -140,10 +128,8 @@ void comms_poll() {
 
     if (ir.present && ir.waiting) {
       String cipher;
-      // lee 1..N mensajes pendientes
-      while (iridium_fetch_next(cipher)) {
-        inbox_push("IR", cipher);  // guarda cifrado, si quieres luego descifras para UI
-      }
+      // RX queda pendiente (stub); mantén inbox como contador si quieres.
+      // while (iridium_fetch_next(cipher)) { inbox_push("IR", cipher); }
     }
   }
 

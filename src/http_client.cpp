@@ -1,53 +1,74 @@
 #include <ArduinoHttpClient.h>
 #include "http_client.h"
 
-// Suponiendo que dentro de OwlHttpClient tienes:
-//   TinyGsmClient* client_;
-//   String host_;
-//   uint16_t port_;
-// y que begin(...) inicializa esos campos.
-
-static void addAuth(HttpClient& http, const char* bearer) {
-  if (bearer && bearer[0]) {
-    http.sendHeader("Authorization", bearer);
-  }
+// Lee la primera línea "HTTP/1.1 200 OK"
+static int parse_status_line(Stream& s) {
+  String line = s.readStringUntil('\n');  // respeta timeout del cliente
+  int sp1 = line.indexOf(' ');
+  if (sp1 < 0) return -1;
+  int sp2 = line.indexOf(' ', sp1 + 1);
+  if (sp2 < 0) sp2 = line.length();
+  return line.substring(sp1 + 1, sp2).toInt();
 }
 
-// PUT JSON
 int OwlHttpClient::putJson(const char* path, const char* jsonBody, const char* bearer) {
-  HttpClient http(*client_, host_.c_str(), port_);
-  http.beginRequest();
-  http.put(path);
-  http.sendHeader("Content-Type", "application/json");
-  http.sendHeader("Connection", "close");
-  addAuth(http, bearer);
-  http.sendHeader("Content-Length", (int)strlen(jsonBody));
-  http.beginBody();
-  http.print(jsonBody);
-  http.endRequest();
+  if (!client_h.connect(_host.c_str(), _port)) return -1;
 
-  int status = http.responseStatusCode();
-  // Puedes leer respuesta si te interesa:
-  // String resp = http.responseBody();
-  http.stop();
-  return status;
+  client_h.print("PUT ");
+  client_h.print(path);
+  client_h.print(" HTTP/1.1\r\nHost: ");
+  client_h.print(_host);
+  client_h.print("\r\nConnection: close\r\nContent-Type: application/json\r\n");
+
+  if (bearer && bearer[0]) {
+    client_h.print("Authorization: ");
+    client_h.print(bearer);
+    client_h.print("\r\n");
+  }
+
+  client_h.print("Content-Length: ");
+  client_h.print((int)strlen(jsonBody));
+  client_h.print("\r\n\r\n");
+  client_h.print(jsonBody);
+
+  int code = parse_status_line(client_h);
+
+  uint32_t t0 = millis();
+  while ((client_h.connected() || client_h.available()) && (millis() - t0 < 5000)) {
+    while (client_h.available()) client_h.read();
+    delay(1);
+  }
+  client_h.stop();
+  return code;
 }
 
-// POST JSON (por si lo quieres usar también)
 int OwlHttpClient::postJson(const char* path, const char* jsonBody, const char* bearer) {
-  HttpClient http(*client_, host_.c_str(), port_);
-  http.beginRequest();
-  http.post(path);
-  http.sendHeader("Content-Type", "application/json");
-  http.sendHeader("Connection", "close");
-  addAuth(http, bearer);
-  http.sendHeader("Content-Length", (int)strlen(jsonBody));
-  http.beginBody();
-  http.print(jsonBody);
-  http.endRequest();
+  if (!client_h.connect(_host.c_str(), _port)) return -1;
 
-  int status = http.responseStatusCode();
-  // String resp = http.responseBody();
-  http.stop();
-  return status;
+  client_h.print("POST ");
+  client_h.print(path);
+  client_h.print(" HTTP/1.1\r\nHost: ");
+  client_h.print(_host);
+  client_h.print("\r\nConnection: close\r\nContent-Type: application/json\r\n");
+
+  if (bearer && bearer[0]) {
+    client_h.print("Authorization: ");
+    client_h.print(bearer);
+    client_h.print("\r\n");
+  }
+
+  client_h.print("Content-Length: ");
+  client_h.print((int)strlen(jsonBody));
+  client_h.print("\r\n\r\n");
+  client_h.print(jsonBody);
+
+  int code = parse_status_line(client_h);
+
+  uint32_t t0 = millis();
+  while ((client_h.connected() || client_h.available()) && (millis() - t0 < 5000)) {
+    while (client_h.available()) client_h.read();
+    delay(1);
+  }
+  client_h.stop();
+  return code;
 }
