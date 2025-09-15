@@ -482,6 +482,24 @@ void loop()
       case UiScreen::MESSAGES:
         oled_draw_messages(ir.waiting ? 1 : 0, "");
         break;
+
+      case UiScreen::GSM_DETAIL: {
+        auto csq_to_dbm = [](int csq)->int {
+          if (csq <= 0)  return -113;
+          if (csq == 1)  return -111;
+          if (csq >= 31) return -51;
+          return -113 + 2 * csq;
+        };
+        int rssiDbm = csq_to_dbm(ui.csq);
+        oled_draw_gsm_detail(ui, g_gsm_imei, g_net_registered, g_pdp_up, rssiDbm);
+      } break;
+
+      case UiScreen::BLE_DETAIL: {
+        extern bool ble_is_connected();        // asegúrate de tener este getter en tu ble.cpp
+        bool bleConn = ble_is_connected();
+        oled_draw_ble_detail(bleConn, String("OwlTracker"));
+      } break;
+
       }
       last = ui;
       lastScreen = g_screen;

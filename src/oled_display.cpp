@@ -1,39 +1,42 @@
-// src/oled_display.cpp
 #include <Arduino.h>
 #include <SPI.h>
 #include <U8g2lib.h>
 #include "board_pins.h"
 #include "oled_display.h"
 
-// Controlador OLED (SSD1322 256x64) por HW SPI
+// HW SPI SSD1322 256x64
 U8G2_SSD1322_NHD_256X64_F_4W_HW_SPI u8g2(
   U8G2_R0, /*cs=*/OLED_PIN_CS, /*dc=*/OLED_PIN_DC, /*reset=*/OLED_PIN_RST
 );
 
-// Helpers
-static inline int  clampi(int v, int lo, int hi){ return v<lo?lo:(v>hi?hi:v); }
-static inline bool isfinitef(float v){ return !isnan(v) && !isinf(v); }
+static inline int clampi(int v, int lo, int hi){ return v<lo?lo:(v>hi?hi:v); }
+static inline float nzf(float v){ return isnan(v)?0.0f:v; }
+static inline double nzd(double v){ return isnan(v)?0.0:v; }
 
-// ---------------- Iconos (compactos) ----------------
-static void drawAntennaXS(int x, int y){
-  u8g2.drawBox(x,   y-3, 1, 3);
-  u8g2.drawBox(x-1, y-1, 3, 1);
+// ---------------- Iconos mini (12 px alto) ----------------
+static void drawAntennaMini(int x, int y){ // base en y
+  u8g2.drawBox(x, y-8, 2, 8);
+  u8g2.drawBox(x-2, y-3, 6, 2);
 }
-static void drawBarsXS(int x, int y, uint8_t level, uint8_t maxBars){
+static void drawBarsMini(int x, int y, uint8_t level, uint8_t maxBars, uint8_t w=2, uint8_t step=2){
   for (uint8_t i=0;i<maxBars;i++){
-    int h = 1 + i;               // 1..5
+    int h = 2 + i*2;                 // 2,4,6,8,10
     int yy = y - h;
-    int xx = x + i*2;            // 1px ancho + 1px gap
-    if (i < level) u8g2.drawBox(xx, yy, 1, h);
-    else           u8g2.drawFrame(xx, yy, 1, h);
+    int xx = x + i*(w+step);
+    if (i < level) u8g2.drawBox(xx, yy, w, h);
+    else           u8g2.drawFrame(xx, yy, w, h);
   }
 }
-static void drawSatelliteXS(int x, int y){ u8g2.drawCircle(x+2, y-2, 2, U8G2_DRAW_ALL); }
-static void drawGlobeXS(int x, int y){ u8g2.drawCircle(x+2, y-2, 2, U8G2_DRAW_ALL); u8g2.drawPixel(x+2, y-2); }
-static void drawMsgXS(int x, int y){
-  u8g2.drawFrame(x, y-4, 6, 4);
-  u8g2.drawLine(x,   y-4, x+3, y-1);
-  u8g2.drawLine(x+6, y-4, x+3, y-1);
+static void drawSatelliteMini(int x, int y){
+  u8g2.drawCircle(x+5, y-6, 5, U8G2_DRAW_ALL);
+  u8g2.drawLine(x+1, y-6, x+9, y-6);
+  u8g2.drawLine(x+5, y-10, x+5, y-2);
+}
+static void drawGlobeMini(int x, int y){
+  u8g2.drawCircle(x+5, y-6, 5, U8G2_DRAW_ALL);
+  u8g2.drawLine(x+1, y-6, x+9, y-6);
+  u8g2.drawLine(x+5, y-10, x+5, y-2);
+  u8g2.drawEllipse(x+5, y-6, 4, 2, U8G2_DRAW_ALL);
 }
 
 // ---------------- CSQ->barras (0..5) ----------------
@@ -46,256 +49,313 @@ static uint8_t csq_to_bars(int csq){
   return 5;
 }
 
-// ---------------- Formatters ----------------
+// ---------------- Strings helpers ----------------
 static String fmtCoord(double v, bool isLat){
   if (isnan(v)) return isLat? "Lat: --.--" : "Lon: --.--";
-  char buf[28];
+  char buf[32];
   snprintf(buf, sizeof(buf), "%s%.6f", (isLat?(v<0?"S ":"N "):(v<0?"W ":"E ")), fabs(v));
   return String(buf);
 }
 static String fmtAlt(double a){
   if (isnan(a)) return "Alt: -- m";
-  char buf[24];
-  snprintf(buf, sizeof(buf), "Alt: %.1f m", a);
+  char buf[24]; snprintf(buf, sizeof(buf), "Alt: %.1f m", a);
   return String(buf);
 }
-static String fmtUtc(const String& s){ return s.length() ? s : String("--:--:--Z"); }
-static String fmtSpeed(float mps){
-  if (!isfinitef(mps)) return "SPD: --.-";
-  float kt = mps * 1.943844f; // m/s -> knots
-  char b[24]; snprintf(b, sizeof(b), "SPD: %.1f kt", kt);
-  return String(b);
+static String fmtSpeed(float s){
+  if (isnan(s)) return "Spd: --.- m/s";
+  char buf[24]; snprintf(buf, sizeof(buf), "Spd: %.1f m/s", s);
+  return String(buf);
 }
-static String fmtTrackDeg(float deg){
-  if (!isfinitef(deg)) return "TRK: ---";
-  while (deg < 0)   deg += 360.f;
-  while (deg >=360) deg -= 360.f;
-  char b[20]; snprintf(b, sizeof(b), "TRK: %03d°", (int)lroundf(deg));
-  return String(b);
+static String fmtCourse(float c){
+  if (isnan(c)) return "Trk: ---";
+  char buf[20]; snprintf(buf, sizeof(buf), "Trk: %.0f", c);
+  return String(buf);
 }
-static const char* cardinalFromDeg(float deg){
-  if (!isfinitef(deg)) return "--";
-  while (deg < 0)   deg += 360.f;
-  while (deg >=360) deg -= 360.f;
-  // 8 vientos (45° por sector)
-  static const char* C[8] = {"N","NE","E","SE","S","SW","W","NW"};
-  int idx = (int)floorf((deg + 22.5f)/45.0f) & 7;
-  return C[idx];
+static String fmtPdop(float p){
+  if (p<0) return "PDOP: --";
+  char buf[20]; snprintf(buf, sizeof(buf), "PDOP: %.1f", p);
+  return String(buf);
+}
+static String fmtMsgs(uint32_t n){
+  char buf[24]; snprintf(buf, sizeof(buf), "MSG: %lu", (unsigned long)n);
+  return String(buf);
+}
+static String fmtUtc(const String& s){
+  return s.length() ? s : String("--:--:--Z");
 }
 
-// ---------------- Init/Splash ----------------
+// ---------------- Init ----------------
 bool oled_init(){
   SPI.begin(OLED_PIN_SCK, /*MISO*/-1, OLED_PIN_MOSI, OLED_PIN_CS);
   pinMode(OLED_PIN_RST, OUTPUT);
   digitalWrite(OLED_PIN_RST, LOW);  delay(10);
   digitalWrite(OLED_PIN_RST, HIGH); delay(10);
+
   u8g2.begin();
   u8g2.setContrast(210);
   return true;
 }
+
 void oled_splash(const char* title){
   u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_logisoso18_tf);
+  u8g2.setFont(u8g2_font_logisoso20_tr);
   int w = u8g2.getStrWidth(title);
-  u8g2.drawStr((256-w)/2, 36, title);
+  u8g2.drawStr((256-w)/2, 38, title);
   u8g2.setFont(u8g2_font_6x12_tf);
-  u8g2.drawStr(86, 56, "booting...");
+  u8g2.drawStr(70, 58, "booting...");
   u8g2.sendBuffer();
 }
 
-// ---------------- Barra superior compacta (SOLO HOME) --------
-static void draw_top_bar_compact(int csq, int sats, int iriLvl, uint32_t msgRx){
-  const int topY = 10;
-  u8g2.setFont(u8g2_font_5x8_tf);
-
-  // CEL
-  drawAntennaXS(4, topY);
-  drawBarsXS(8, topY, csq_to_bars(csq), 5);
-
-  // GPS
-  drawSatelliteXS(54, topY);
-  char gbuf[10];
-  if (sats >= 0) snprintf(gbuf, sizeof(gbuf), "G:%02d", sats);
-  else           snprintf(gbuf, sizeof(gbuf), "G:--");
-  u8g2.drawStr(60, topY, gbuf);
-
-  // IR
-  drawGlobeXS(104, topY);
-  char ibuf[10];
-  if (iriLvl >= 0) snprintf(ibuf, sizeof(ibuf), "IR:%d", clampi(iriLvl,0,5));
-  else             snprintf(ibuf, sizeof(ibuf), "IR:--");
-  u8g2.drawStr(110, topY, ibuf);
-
-  // MSG
-  drawMsgXS(200, topY);
-  char mbuf[16]; snprintf(mbuf, sizeof(mbuf), "M:%lu", (unsigned long)msgRx);
-  u8g2.drawStr(208, topY, mbuf);
-
-  // línea separadora
-  u8g2.drawHLine(0, 14, 256);
-}
-
-// ---------------- HOME ----------------
-// SPD debajo de ALT (lado derecho). UTC centrado abajo.
-// Barra superior compacta solo aquí.
+// =============================================================
+//  HOME / DASHBOARD
+//  - Top mini-icons + barras (CEL, GPS, IR) + MSG a la derecha
+//  - Separadores horizontales
+//  - Centro: Lat | Lon | Alt   (y debajo Spd)
+//  - Inferior: PDOP (izq) | UTC (centro)
+// =============================================================
 void oled_draw_dashboard(const OwlUiData& d){
   u8g2.clearBuffer();
 
-  // TOP (compact)
-  draw_top_bar_compact(d.csq, d.sats, d.iridiumLvl, d.msgRx);
+  // ---------- Top ----------
+  int topY = 12;  // mini altura
+  u8g2.drawHLine(0, 16, 256);   // separador
 
-  // MIDDLE
+  // CEL
+  drawAntennaMini(6, topY);
+  uint8_t bars = csq_to_bars(d.csq);
+  drawBarsMini(14, topY, clampi(bars,0,5), 5, 2, 2);
+  u8g2.setFont(u8g2_font_5x8_tf);
+  u8g2.drawStr(14 + 5*(2+2) + 4, topY, "CEL");
+
+  // GPS centro top
+  int xgps = 104;
+  drawSatelliteMini(xgps, topY);
+  char gpsBuf[20];
+  if (d.sats >= 0) snprintf(gpsBuf, sizeof(gpsBuf), "GPS %02d", d.sats);
+  else             snprintf(gpsBuf, sizeof(gpsBuf), "GPS --");
+  u8g2.drawStr(xgps + 14, topY, gpsBuf);
+
+  // IR derecha top
+  int xir = 190;
+  drawGlobeMini(xir, topY);
+  if (d.iridiumLvl < 0) {
+    u8g2.drawStr(xir + 14, topY, "IR --");
+  } else {
+    uint8_t irBars = clampi(d.iridiumLvl, 0, 5);
+    drawBarsMini(xir + 14, topY, irBars, 5, 2, 2);
+    u8g2.drawStr(xir + 14 + 5*(2+2) + 4, topY, "IR");
+  }
+
+  // Mensajes (contador en top derecha)
+  String sMsgTop = fmtMsgs(d.msgRx);
+  int wMsgTop = u8g2.getStrWidth(sMsgTop.c_str());
+  u8g2.drawStr(256 - 6 - wMsgTop, topY, sMsgTop.c_str());
+
+  // ---------- Centro ----------
   u8g2.setFont(u8g2_font_6x12_tf);
   String sLat = fmtCoord(d.lat, true);
   String sLon = fmtCoord(d.lon, false);
   String sAlt = fmtAlt(d.alt);
   String sSpd = fmtSpeed(d.speed_mps);
 
-  // Lat/Lon a la izquierda
-  u8g2.drawStr(6, 30,  sLat.c_str());
-  u8g2.drawStr(6, 42,  sLon.c_str());
-
-  // ALT a la derecha (fila 30)
+  u8g2.drawStr(6, 34,  sLat.c_str());
+  u8g2.drawStr(90, 34, sLon.c_str());
   int wAlt = u8g2.getStrWidth(sAlt.c_str());
-  u8g2.drawStr(256 - 6 - wAlt, 30, sAlt.c_str());
+  u8g2.drawStr(256 - 6 - wAlt, 34, sAlt.c_str());
 
-  // SPD DEBAJO de ALT (fila 42, a la derecha)
+  // Spd debajo de Alt (simetría)
   int wSpd = u8g2.getStrWidth(sSpd.c_str());
-  u8g2.drawStr(256 - 6 - wSpd, 42, sSpd.c_str());
+  u8g2.drawStr(256 - 6 - wSpd, 48, sSpd.c_str());
 
-  // Separador fino encima de la franja inferior
-  u8g2.drawHLine(0, 50, 256);
+  // separador sección inferior
+  u8g2.drawHLine(0, 52, 256);
 
-  // BOTTOM: UTC centrado
-  String sUtc = fmtUtc(d.utc);
+  // ---------- Inferior ----------
+  String sPdop = fmtPdop(d.pdop);
+  String sUtc  = fmtUtc(d.utc);
+
+  u8g2.drawStr(6, 62, sPdop.c_str());                  // izq
   int wUtc = u8g2.getStrWidth(sUtc.c_str());
-  u8g2.drawStr((256 - wUtc)/2, 62, sUtc.c_str());
+  u8g2.drawStr((256 - wUtc)/2, 62, sUtc.c_str());      // centro
 
   u8g2.sendBuffer();
 }
 
-// ---------------- GPS DETAIL ----------------
-// Sin barra superior. Muestra Lat/Lon/Alt y TRK con cardinal + SPD.
+// =============================================================
+//  GPS DETAIL
+//  - Sin barra superior, más info: Trk con cardinal
+// =============================================================
+static const char* cardinal(float deg) {
+  if (isnan(deg)) return "---";
+  static const char* dirs[]={"N","NNE","NE","ENE","E","ESE","SE","SSE",
+                             "S","SSW","SW","WSW","W","WNW","NW","NNW"};
+  int idx = (int)floor((deg/22.5f)+0.5f) & 15;
+  return dirs[idx];
+}
 void oled_draw_gps_detail(const OwlUiData& d){
   u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_6x12_tf);
 
-  // Título
-  u8g2.drawStr(6, 14, "GPS DETAIL");
+  u8g2.setFont(u8g2_font_7x14_tf);
+  u8g2.drawStr(6, 14, "GPS Detail");
   u8g2.drawHLine(0, 18, 256);
 
-  // Posición (izquierda)
-  String sLat = fmtCoord(d.lat, true);
-  String sLon = fmtCoord(d.lon, false);
-  u8g2.drawStr(6, 32, sLat.c_str());
-  u8g2.drawStr(6, 46, sLon.c_str());
+  u8g2.setFont(u8g2_font_6x12_tf);
+  char ln1[64]; snprintf(ln1, sizeof(ln1), "Sats: %02d   PDOP: %s",
+                         d.sats<0?0:d.sats,
+                         (d.pdop<0?"--":String(d.pdop,1).c_str()));
+  u8g2.drawStr(6, 34, ln1);
 
-  // Altura (derecha, misma fila de Lat)
+  String s1 = fmtCoord(d.lat, true);
+  String s2 = fmtCoord(d.lon, false);
+  u8g2.drawStr(6, 48, s1.c_str());
+  u8g2.drawStr(6, 62, s2.c_str());
+
+  // Alt + Spd + Trk (con cardinal)
   String sAlt = fmtAlt(d.alt);
-  int wAlt = u8g2.getStrWidth(sAlt.c_str());
-  u8g2.drawStr(256 - 6 - wAlt, 32, sAlt.c_str());
-
-  // SPD (derecha, fila 46)
   String sSpd = fmtSpeed(d.speed_mps);
-  int wSpd = u8g2.getStrWidth(sSpd.c_str());
-  u8g2.drawStr(256 - 6 - wSpd, 46, sSpd.c_str());
+  String sTrk = String("Trk: ") + (isnan(d.course_deg)?"---":String(d.course_deg,0)) +
+                " " + cardinal(d.course_deg);
 
-  // TRK con cardinal (derecha, fila 60)
-  String sTrkDeg = fmtTrackDeg(d.course_deg);
-  const char* card = cardinalFromDeg(d.course_deg);
-  char trkBuf[32];
-  if (isfinitef(d.course_deg)) snprintf(trkBuf, sizeof(trkBuf), "%s %s", sTrkDeg.c_str(), card);
-  else                         snprintf(trkBuf, sizeof(trkBuf), "TRK: ---  --");
-  int wTrk = u8g2.getStrWidth(trkBuf);
-  u8g2.drawStr(256 - 6 - wTrk, 60, trkBuf);
+  int wAlt = u8g2.getStrWidth(sAlt.c_str());
+  int wSpd = u8g2.getStrWidth(sSpd.c_str());
+  int wTrk = u8g2.getStrWidth(sTrk.c_str());
+
+  // Columna derecha (arriba-abajo)
+  u8g2.drawStr(256-6-wAlt, 34, sAlt.c_str());
+  u8g2.drawStr(256-6-wSpd, 48, sSpd.c_str());
+  u8g2.drawStr(256-6-wTrk, 62, sTrk.c_str());
 
   u8g2.sendBuffer();
 }
 
-// ---------------- IRIDIUM DETAIL ----------------
-// Sin barra superior
+// =============================================================
+//  IRIDIUM DETAIL (simple)
+// =============================================================
 void oled_draw_iridium_detail(bool present, int sigLevel, int unread, const String& imei){
   u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_6x12_tf);
 
-  u8g2.drawStr(6, 14, "IRIDIUM DETAIL");
+  u8g2.setFont(u8g2_font_7x14_tf);
+  u8g2.drawStr(6, 14, "Iridium Detail");
   u8g2.drawHLine(0, 18, 256);
 
-  // IMEI (no depende de señal)
-  String sImei = imei.length() ? String("IMEI: ") + imei : String("IMEI: --");
-  u8g2.drawStr(6, 34, sImei.c_str());
+  u8g2.setFont(u8g2_font_6x12_tf);
+  String sPr = String("Present: ") + (present?"YES":"NO");
+  u8g2.drawStr(6, 34, sPr.c_str());
 
-  // Presencia / Señal / Mensajes
-  char sPr[20]; snprintf(sPr, sizeof(sPr), "PRESENT: %s", present ? "YES":"NO");
-  u8g2.drawStr(6, 48, sPr);
+  char ln1[48];
+  snprintf(ln1, sizeof(ln1), "Signal: %s",
+          (sigLevel<0?"--":String(sigLevel).c_str()));
+  u8g2.drawStr(6, 48, ln1);
 
-  char sSig[16];
-  if (sigLevel >= 0) snprintf(sSig, sizeof(sSig), "SIG: %d/5", clampi(sigLevel,0,5));
-  else               snprintf(sSig, sizeof(sSig), "SIG: --");
-  int wSig = u8g2.getStrWidth(sSig);
-  u8g2.drawStr(256 - 6 - wSig, 48, sSig);
+  String sIMEI = String("IMEI: ") + (imei.length()?imei:"--");
+  u8g2.drawStr(6, 62, sIMEI.c_str());
 
-  char sMt[20]; snprintf(sMt, sizeof(sMt), "MT waiting: %d", unread);
-  int wMt = u8g2.getStrWidth(sMt);
-  u8g2.drawStr(256 - 6 - wMt, 60, sMt);
+  // Unread (derecha)
+  String sU = String("MT: ") + (unread>=0?String(unread):String("--"));
+  int wU = u8g2.getStrWidth(sU.c_str());
+  u8g2.drawStr(256-6-wU, 34, sU.c_str());
 
   u8g2.sendBuffer();
 }
 
-// ---------------- SYS CONFIG ----------------
-// Sin barra superior
-void oled_draw_sys_config(const OwlUiData& d, bool netReg, bool pdpUp,
-                          const String& ip, bool sdOk, bool i2cOk, const char* fw){
+// =============================================================
+//  GSM DETAIL (nuevo)
+// =============================================================
+void oled_draw_gsm_detail(const OwlUiData& d,
+                          const String& imei,
+                          bool netReg,
+                          bool pdpUp,
+                          int rssiDbm)
+{
   u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_6x12_tf);
 
-  u8g2.drawStr(6, 14, "SYS CONFIG");
+  u8g2.setFont(u8g2_font_7x14_tf);
+  u8g2.drawStr(6, 14, "GSM / LTE Detail");
   u8g2.drawHLine(0, 18, 256);
 
-  // NET / PDP
-  char l1[48];
-  snprintf(l1, sizeof(l1), "NET:%s  PDP:%s", netReg?"ON":"OFF", pdpUp?"UP":"DOWN");
-  u8g2.drawStr(6, 32, l1);
+  u8g2.setFont(u8g2_font_6x12_tf);
+  char ln1[64];
+  snprintf(ln1, sizeof(ln1), "CSQ: %d   RSSI: %d dBm", d.csq, rssiDbm);
+  u8g2.drawStr(6, 34, ln1);
 
-  // IP
-  String ipStr = String("IP: ") + (ip.length()? ip : String("--"));
-  u8g2.drawStr(6, 46, ipStr.c_str());
+  char ln2[64];
+  snprintf(ln2, sizeof(ln2), "Net: %s   PDP: %s", netReg ? "REGISTERED" : "NO",
+                                              pdpUp  ? "UP"         : "DOWN");
+  u8g2.drawStr(6, 48, ln2);
 
-  // SD / I2C
-  char l3[48];
-  snprintf(l3, sizeof(l3), "SD:%s  I2C:%s", sdOk?"OK":"NO", i2cOk?"OK":"NO");
-  int wL3 = u8g2.getStrWidth(l3);
-  u8g2.drawStr(256 - 6 - wL3, 46, l3);
-
-  // FW/Notas (ej: “fw 1.0.0 BLE:OK”)
-  if (fw && *fw) {
-    int w = u8g2.getStrWidth(fw);
-    u8g2.drawStr(256 - 6 - w, 32, fw);
-  }
+  String sImei = String("IMEI: ") + (imei.length()?imei:"--");
+  u8g2.drawStr(6, 62, sImei.c_str());
 
   u8g2.sendBuffer();
 }
 
-// ---------------- MESSAGES ----------------
-// Sin barra superior
+// =============================================================
+//  BLE DETAIL (nuevo)
+// =============================================================
+void oled_draw_ble_detail(bool connected, const String& devName)
+{
+  u8g2.clearBuffer();
+
+  u8g2.setFont(u8g2_font_7x14_tf);
+  u8g2.drawStr(6, 14, "BLE Detail");
+  u8g2.drawHLine(0, 18, 256);
+
+  u8g2.setFont(u8g2_font_6x12_tf);
+  const char* st = connected ? "CONNECTED" : "ADVERTISING";
+  char ln1[64];
+  snprintf(ln1, sizeof(ln1), "Status: %s", st);
+  u8g2.drawStr(6, 34, ln1);
+
+  String nm = String("Name: ") + (devName.length()?devName:"OwlTracker");
+  u8g2.drawStr(6, 48, nm.c_str());
+
+  u8g2.drawStr(6, 62, "BTN1 long: cycle screens");
+
+  u8g2.sendBuffer();
+}
+
+// =============================================================
+//  SYS CONFIG (ya presente en tu proyecto) y MESSAGES (stub)
+//  — deja tus implementaciones actuales si ya existen —
+// =============================================================
+void oled_draw_sys_config(const OwlUiData& d, bool netReg, bool pdpUp,
+                          const String& ip, bool sdOk, bool i2cOk, const char* fw) {
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_7x14_tf);
+  u8g2.drawStr(6, 14, "System Config");
+  u8g2.drawHLine(0, 18, 256);
+
+  u8g2.setFont(u8g2_font_6x12_tf);
+  char ln1[64]; snprintf(ln1, sizeof(ln1), "Net: %s   PDP: %s", netReg?"REG":"NO", pdpUp?"UP":"DOWN");
+  u8g2.drawStr(6, 34, ln1);
+
+  String ipS = String("IP: ") + (ip.length()?ip:"--");
+  u8g2.drawStr(6, 48, ipS.c_str());
+
+  char ln2[64]; snprintf(ln2, sizeof(ln2), "SD: %s   I2C: %s", sdOk?"OK":"NO", i2cOk?"OK":"NO");
+  u8g2.drawStr(6, 62, ln2);
+
+  // fw a la derecha
+  int w = u8g2.getStrWidth(fw);
+  u8g2.drawStr(256-6-w, 34, fw);
+
+  u8g2.sendBuffer();
+}
+
 void oled_draw_messages(uint16_t unread, const String& last){
   u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_6x12_tf);
 
-  u8g2.drawStr(6, 14, "MESSAGES");
+  u8g2.setFont(u8g2_font_7x14_tf);
+  u8g2.drawStr(6, 14, "Messages");
   u8g2.drawHLine(0, 18, 256);
 
-  char mBuf[24]; snprintf(mBuf, sizeof(mBuf), "UNREAD: %u", unread);
-  u8g2.drawStr(6, 32, mBuf);
+  u8g2.setFont(u8g2_font_6x12_tf);
+  char ln1[32]; snprintf(ln1, sizeof(ln1), "Unread: %u", unread);
+  u8g2.drawStr(6, 34, ln1);
 
-  String s = last.length()? last : String("(no messages)");
-  int w = u8g2.getStrWidth(s.c_str());
-  if (w > 244) {
-    String cut = s.substring(0, 30) + "...";
-    u8g2.drawStr(6, 46, cut.c_str());
-  } else {
-    u8g2.drawStr(6, 46, s.c_str());
-  }
+  String sLast = String("Last: ") + (last.length()?last:"--");
+  u8g2.drawStr(6, 48, sLast.c_str());
 
+  u8g2.drawStr(6, 62, "BTN1 long: cycle screens");
   u8g2.sendBuffer();
 }

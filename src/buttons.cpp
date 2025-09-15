@@ -1,60 +1,104 @@
 #include "buttons.h"
 
-// PINS (ajusta si ya los tenías):
-#ifndef PIN_BTN1
-#define PIN_BTN1 13
-#endif
-#ifndef PIN_BTN2
-#define PIN_BTN2 14
-#endif
-#ifndef PIN_BTN3
-#define PIN_BTN3 27
-#endif
-#ifndef PIN_BTN4
-#define PIN_BTN4 15   // NUEVO: Testing
-#endif
+// Tiempos
+static const uint16_t DEBOUNCE_MS  = 20;
+static const uint16_t LONGPRESS_MS = 900;
 
-// ... reutiliza tu implementación existente …
-// duplica el patrón de tu 1..3 para 4
+// Estado interno por botón
+struct BtnState {
+  uint8_t  pin;
+  bool     hasInternalPullup; // true si usamos INPUT_PULLUP
+  bool     lastLevel;         // último nivel leído (true=HIGH)
+  uint32_t tStable;           // t del último cambio estable (debounced)
+  bool     pressed;           // estado estable (true=presionado)
+  bool     longFired;         // ya se emitió longPress
+  BtnEvent pending;           // evento pendiente a entregar
+};
 
-// ejemplo simple (si usabas este estilo):
-static BtnEvent e1,e2,e3,e4;
-static uint32_t t1,t2,t3,t4;
-static bool     s1,s2,s3,s4;
+static BtnState s_b1, s_b2, s_b3, s_b4;
 
-static void poll_one(uint8_t pin, uint32_t& t0, bool& st, BtnEvent& ev) {
-  bool v = (digitalRead(pin)==LOW);
-  ev = {};
-  static const uint16_t LONG_MS=800, DEBOUNCE=20;
-  static uint32_t last=0; // (compartido es suficiente aquí)
+// Devuelve true si ese GPIO soporta INPUT_PULLUP y queremos usarlo
+static bool wants_internal_pullup(uint8_t pin) {
+  // En ESP32, GPIO34/35/36/39 no tienen pull-ups internos.
+  // BTN1=25 sí lo tiene.
+  if (pin == 34 || pin == 35 || pin == 36 || pin == 39) return false;
+  return true;
+}
 
-  if (millis()-last < DEBOUNCE) return;
-  last=millis();
+static void init_btn(BtnState& b, uint8_t pin) {
+  b.pin = pin;
+  b.hasInternalPullup = wants_internal_pullup(pin);
 
-  if (v && !st) { st=true; t0=millis(); }
-  else if (!v && st) {
-    st=false;
-    uint32_t dt = millis()-t0;
-    if (dt > LONG_MS) ev.longPress=true;
-    else              ev.shortPress=true;
+  if (b.hasInternalPullup) pinMode(pin, INPUT_PULLUP);
+  else                     pinMode(pin, INPUT);          // requiere pull-up externo a 3V3
+
+  b.lastLevel = digitalRead(pin);
+  b.tStable   = millis();
+  b.pressed   = false;
+  b.longFired = false;
+  b.pending   = {};
+}
+
+void buttons_begin() {
+  init_btn(s_b1, PIN_BTN1); // HOME/NEXT
+  init_btn(s_b2, PIN_BTN2); // MSG/POI
+  init_btn(s_b3, PIN_BTN3); // SOS
+  init_btn(s_b4, PIN_BTN4); // TESTING
+}
+
+// Debounce y detección de eventos para un botón
+static void poll_one(BtnState& b) {
+  bool lvl = digitalRead(b.pin);
+
+  // Debounce: esperar estabilidad DEBOUNCE_MS
+  if (lvl != b.lastLevel) {
+    b.lastLevel = lvl;
+    b.tStable   = millis();      // reinicia ventana
+    return;
+  }
+  if (millis() - b.tStable < DEBOUNCE_MS) return;
+
+  // Con pulsadores a GND: PRESSED = nivel LOW
+  bool isPressedLevel = (lvl == LOW);
+
+  // Transiciones
+  if (isPressedLevel && !b.pressed) {
+    // Flanco de caída (inicio de pulsación)
+    b.pressed   = true;
+    b.longFired = false;
+    // arrancamos cronómetro en tStable (ya debounced)
+  } else if (!isPressedLevel && b.pressed) {
+    // Flanco de subida (fin de pulsación)
+    uint32_t heldMs = millis() - b.tStable; // tiempo desde el último cambio estable
+    if (!b.longFired) {
+      // Si no disparó long, es short
+      b.pending.shortPress = true;
+    }
+    b.pressed   = false;
+    b.longFired = false;
+  } else if (isPressedLevel && b.pressed && !b.longFired) {
+    // Pulsación sostenida: comprobar long
+    if (millis() - b.tStable >= LONGPRESS_MS) {
+      b.longFired = true;
+      b.pending.longPress = true;
+    }
   }
 }
 
-void buttons_begin(){
-  pinMode(PIN_BTN1, INPUT_PULLUP);
-  pinMode(PIN_BTN2, INPUT_PULLUP);
-  pinMode(PIN_BTN3, INPUT_PULLUP);
-  pinMode(PIN_BTN4, INPUT_PULLUP); // NUEVO
+void buttons_poll() {
+  poll_one(s_b1);
+  poll_one(s_b2);
+  poll_one(s_b3);
+  poll_one(s_b4);
 }
 
-void buttons_poll(){
-  poll_one(PIN_BTN1,t1,s1,e1);
-  poll_one(PIN_BTN2,t2,s2,e2);
-  poll_one(PIN_BTN3,t3,s3,e3);
-  poll_one(PIN_BTN4,t4,s4,e4); // NUEVO
+static BtnEvent take(BtnState& b) {
+  BtnEvent e = b.pending;
+  b.pending = {};
+  return e;
 }
 
-BtnEvent btn1_get(){ BtnEvent t=e1; e1={}; return t; }
-BtnEvent btn2_get(){ BtnEvent t=e2; e2={}; return t; }
-BtnEvent btn3_get(){ BtnEvent t=e3; e3={}; return t; }
-BtnEvent btn4_get(){ BtnEvent t=e4; e4={}; return t; } // NUEVO
+BtnEvent btn1_get() { return take(s_b1); }
+BtnEvent btn2_get() { return take(s_b2); }
+BtnEvent btn3_get() { return take(s_b3); }
+BtnEvent btn4_get() { return take(s_b4); }
