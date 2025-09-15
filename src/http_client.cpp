@@ -1,14 +1,13 @@
 #include "http_client.h"
-#include <cstring>   // strlen
+#include <cstring> // strlen
 
 // ==================== CTOR / BEGIN / GETTERS ====================
 OwlHttpClient::OwlHttpClient(TinyGsm& /*modem*/,
                              TinyGsmClient& client,
                              const String& host,
                              uint16_t port)
-: client_h(client), _host(host), _port(port)
-{
-}
+: _client(client), _host(host), _port(port)
+{}
 
 void OwlHttpClient::begin(TinyGsm& /*modem*/,
                           const char* host,
@@ -19,19 +18,18 @@ void OwlHttpClient::begin(TinyGsm& /*modem*/,
   _port = port;
 }
 
-TinyGsmClient& OwlHttpClient::client()       { return client_h; }
+TinyGsmClient& OwlHttpClient::client()       { return _client; }
 const String&  OwlHttpClient::host() const   { return _host; }
 uint16_t       OwlHttpClient::port() const   { return _port; }
 
 // ==================== HELPERS INTERNOS ====================
 static int parse_status_line(Stream& s, uint32_t timeout_ms = 3000) {
-  // Espera datos iniciales (hasta timeout)
   uint32_t t0 = millis();
   while (!s.available() && (millis() - t0 < timeout_ms)) { delay(1); }
   if (!s.available()) return -1;
 
   // Primera línea: "HTTP/1.1 200 OK\r\n"
-  String line = s.readStringUntil('\n'); // respeta timeout del cliente
+  String line = s.readStringUntil('\n');
   int sp1 = line.indexOf(' ');
   if (sp1 < 0) return -1;
   int sp2 = line.indexOf(' ', sp1 + 1);

@@ -33,7 +33,9 @@ HardwareSerial SerialAT(1);
 HardwareSerial SerialGPS(2);
 
 TinyGsm modem(SerialAT);
-OwlHttpClient http;
+TinyGsmClient gsmClient(modem);                       // <— crea el cliente a partir del modem
+OwlHttpClient http(modem, gsmClient, netcfg::HOST, netcfg::PORT);
+
 SPIClass hspi(HSPI);
 
 // Estado global
@@ -485,7 +487,7 @@ void loop()
       lastScreen = g_screen;
     }
 
-    LOG("[Owl] UI tick");
+    // LOG("[Owl] UI tick");
   }
 
   // Log SD (30 s)
