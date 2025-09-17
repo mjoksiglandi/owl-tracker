@@ -359,3 +359,56 @@ void oled_draw_messages(uint16_t unread, const String& last){
   u8g2.drawStr(6, 62, "BTN1 long: cycle screens");
   u8g2.sendBuffer();
 }
+
+#include "settings.h"  // para LinkPref
+
+static const char* pref_to_cstr(LinkPref p){
+  switch(p){
+    case LinkPref::AUTO:     return "AUTO";
+    case LinkPref::GSM_ONLY: return "GSM";
+    case LinkPref::IR_ONLY:  return "IRIDIUM";
+    case LinkPref::BOTH:     return "BOTH";
+    default:                 return "--";
+  }
+}
+
+void oled_draw_testing(LinkPref pref, const char* lastResult, bool busy){
+  u8g2.clearBuffer();
+
+  u8g2.setFont(u8g2_font_7x14_tf);
+  u8g2.drawStr(6, 14, "Testing");
+  u8g2.drawHLine(0, 18, 256);
+
+  u8g2.setFont(u8g2_font_6x12_tf);
+
+  // Línea preferencia
+  {
+    String ln = String("Pref: ") + pref_to_cstr(pref) + "   (BTN2 to change)";
+    u8g2.drawStr(6, 34, ln.c_str());
+  }
+
+  // Línea acción
+  u8g2.drawStr(6, 48, "BTN3: Quick Test (GSM ping / IR MO)");
+
+  // Resultado
+  {
+    String lr = String("Last: ") + (lastResult && *lastResult ? lastResult : "--");
+    int w = u8g2.getStrWidth(lr.c_str());
+    if (w > 244) { // truncado simple
+      // dibuja los primeros chars que quepan
+      // (opcional: podrías hacer un scroll marquee si quieres)
+      u8g2.drawStr(6, 62, lr.substring(0, 40).c_str());
+    } else {
+      u8g2.drawStr(6, 62, lr.c_str());
+    }
+  }
+
+  // Indicador de actividad (busy)
+  if (busy) {
+    u8g2.drawStr(200, 14, "RUN...");
+  } else {
+    u8g2.drawStr(200, 14, "IDLE");
+  }
+
+  u8g2.sendBuffer();
+}

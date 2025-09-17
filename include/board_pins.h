@@ -70,6 +70,6 @@
 //  Botonera
 // -----------------------------
 #define PIN_BTN1       25     // HOME / Menús (INPUT_PULLUP interno OK)
-#define PIN_BTN2       34     // requiere pull-up externo
-#define PIN_BTN3       35     // requiere pull-up externo
+#define PIN_BTN2       35     // requiere pull-up externo
+#define PIN_BTN3       36     // requiere pull-up externo
 #define PIN_BTN4       39     // requiere pull-up externo

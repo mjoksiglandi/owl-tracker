@@ -6,10 +6,10 @@
   #define PIN_BTN1 25   // HOME / Menús (tiene pull-up interno)
 #endif
 #ifndef PIN_BTN2
-  #define PIN_BTN2 34   // MSG / POI (solo input: requiere pull-up externo)
+  #define PIN_BTN2 35   // MSG / POI (solo input: requiere pull-up externo)
 #endif
 #ifndef PIN_BTN3
-  #define PIN_BTN3 35   // SOS       (solo input: requiere pull-up externo)
+  #define PIN_BTN3 36   // SOS       (solo input: requiere pull-up externo)
 #endif
 #ifndef PIN_BTN4
   #define PIN_BTN4 39   // TESTING   (solo input: requiere pull-up externo)
