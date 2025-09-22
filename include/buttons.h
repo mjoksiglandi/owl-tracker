@@ -1,33 +1,22 @@
 #pragma once
 #include <Arduino.h>
 
-// ---- Pines (si ya los defines en board_pins.h, puedes omitir esto) ----
-#ifndef PIN_BTN1
-  #define PIN_BTN1 25   // HOME / Menús (tiene pull-up interno)
-#endif
-#ifndef PIN_BTN2
-  #define PIN_BTN2 35   // MSG / POI (solo input: requiere pull-up externo)
-#endif
-#ifndef PIN_BTN3
-  #define PIN_BTN3 36   // SOS       (solo input: requiere pull-up externo)
-#endif
-#ifndef PIN_BTN4
-  #define PIN_BTN4 39   // TESTING   (solo input: requiere pull-up externo)
-#endif
-
+// Evento estándar para cada botón
 struct BtnEvent {
-  bool shortPress = false;
-  bool longPress  = false;
+  bool shortPress;   // true en el tick en que se suelta tras 80..250 ms
+  bool longPress;    // true una sola vez cuando se cruza el umbral de long (>= 600 ms)
+  bool repeat;       // true cada 700 ms mientras se mantiene tras el longPress (auto-repeat)
+  uint32_t heldMs;   // ms que lleva presionado (cap a 60000 ms)
 };
 
-// Inicialización (pone modos correctos por pin)
+// Inicialización (configura pines y estado interno)
 void buttons_begin();
 
-// Llamar cada ~10ms desde loop()
+// Debounce + FSM, llámalo ~cada 2–10 ms
 void buttons_poll();
 
-// Obtención y consumo de eventos (clears)
-BtnEvent btn1_get();   // HOME / NEXT
-BtnEvent btn2_get();   // MSG / POI
-BtnEvent btn3_get();   // SOS
-BtnEvent btn4_get();   // TESTING (modo)
+// Getters por botón (devuelven y limpian el evento del tick)
+BtnEvent btn1_get();
+BtnEvent btn2_get();
+BtnEvent btn3_get();
+BtnEvent btn4_get();

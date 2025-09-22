@@ -98,3 +98,21 @@ void modem_print_status(TinyGsm &m) {
   }
 }
 
+String modem_rat_label(TinyGsm &m) {
+  // Pregunta al módem su estado de portadora / RAT
+  // SIM7600: AT+CPSI? -> contiene "GSM"/"WCDMA"/"LTE"/"NR5G"
+  m.sendAT("+CPSI?");
+  if (m.waitResponse(3000, "+CPSI:") == 1) {
+    String line = m.stream.readStringUntil('\n');
+    line.toUpperCase();
+    // Heurística simple -> etiqueta corta tipo celulares
+    if (line.indexOf("NR5G")   >= 0) return "5G";
+    if (line.indexOf("LTE")    >= 0) return "4G";
+    if (line.indexOf("WCDMA")  >= 0) return "3G";
+    if (line.indexOf("HSPA")   >= 0) return "3G";
+    if (line.indexOf("UMTS")   >= 0) return "3G";
+    if (line.indexOf("GSM")    >= 0) return "2G";
+  }
+  return "--";
+}
+

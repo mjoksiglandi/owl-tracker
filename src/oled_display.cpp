@@ -3,41 +3,17 @@
 #include <U8g2lib.h>
 #include "board_pins.h"
 #include "oled_display.h"
+#include "settings.h"   
 
 // HW SPI SSD1322 256x64
 U8G2_SSD1322_NHD_256X64_F_4W_HW_SPI u8g2(
   U8G2_R0, /*cs=*/OLED_PIN_CS, /*dc=*/OLED_PIN_DC, /*reset=*/OLED_PIN_RST
 );
 
+// -------- utilidades internas --------
 static inline int clampi(int v, int lo, int hi){ return v<lo?lo:(v>hi?hi:v); }
 static inline float nzf(float v){ return isnan(v)?0.0f:v; }
 static inline double nzd(double v){ return isnan(v)?0.0:v; }
-
-// ---------------- Iconos mini (12 px alto) ----------------
-static void drawAntennaMini(int x, int y){ // base en y
-  u8g2.drawBox(x, y-8, 2, 8);
-  u8g2.drawBox(x-2, y-3, 6, 2);
-}
-static void drawBarsMini(int x, int y, uint8_t level, uint8_t maxBars, uint8_t w=2, uint8_t step=2){
-  for (uint8_t i=0;i<maxBars;i++){
-    int h = 2 + i*2;                 // 2,4,6,8,10
-    int yy = y - h;
-    int xx = x + i*(w+step);
-    if (i < level) u8g2.drawBox(xx, yy, w, h);
-    else           u8g2.drawFrame(xx, yy, w, h);
-  }
-}
-static void drawSatelliteMini(int x, int y){
-  u8g2.drawCircle(x+5, y-6, 5, U8G2_DRAW_ALL);
-  u8g2.drawLine(x+1, y-6, x+9, y-6);
-  u8g2.drawLine(x+5, y-10, x+5, y-2);
-}
-static void drawGlobeMini(int x, int y){
-  u8g2.drawCircle(x+5, y-6, 5, U8G2_DRAW_ALL);
-  u8g2.drawLine(x+1, y-6, x+9, y-6);
-  u8g2.drawLine(x+5, y-10, x+5, y-2);
-  u8g2.drawEllipse(x+5, y-6, 4, 2, U8G2_DRAW_ALL);
-}
 
 // ---------------- CSQ->barras (0..5) ----------------
 static uint8_t csq_to_bars(int csq){
@@ -106,50 +82,79 @@ void oled_splash(const char* title){
   u8g2.sendBuffer();
 }
 
+// ---------------- Iconos mini (10 px alto) ----------------
+static void drawAntennaMini(int x, int y){ // base en y
+  // más compacto: ~10px alto total
+  u8g2.drawBox(x,   y-7, 2, 7);
+  u8g2.drawBox(x-2, y-3, 6, 2);
+}
+static void drawBarsMini(int x, int y, uint8_t level, uint8_t maxBars, uint8_t w=2, uint8_t step=1){
+  // barras más finas y cercanas
+  for (uint8_t i=0;i<maxBars;i++){
+    int h  = 1 + i*2;              // 1,3,5,7,9
+    int yy = y - h;
+    int xx = x + i*(w+step);
+    if (i < level) u8g2.drawBox(xx, yy, w, h);
+    else           u8g2.drawFrame(xx, yy, w, h);
+  }
+}
+static void drawSatelliteMini(int x, int y){
+  u8g2.drawCircle(x+4, y-5, 4, U8G2_DRAW_ALL);
+  u8g2.drawLine(x+1, y-5, x+7, y-5);
+  u8g2.drawLine(x+4, y-8, x+4, y-2);
+}
+static void drawGlobeMini(int x, int y){
+  u8g2.drawCircle(x+4, y-5, 4, U8G2_DRAW_ALL);
+  u8g2.drawLine(x+1, y-5, x+7, y-5);
+  u8g2.drawLine(x+4, y-8, x+4, y-2);
+  u8g2.drawEllipse(x+4, y-5, 3, 2, U8G2_DRAW_ALL);
+}
+
 // =============================================================
 //  HOME / DASHBOARD
-//  - Top mini-icons + barras (CEL, GPS, IR) + MSG a la derecha
+//  - Top mini-icons (compactos) + barras (CEL con RAT label) + MSG
 //  - Separadores horizontales
 //  - Centro: Lat | Lon | Alt   (y debajo Spd)
-//  - Inferior: PDOP (izq) | UTC (centro)
+//  - Inferior: PDOP | UTC
 // =============================================================
-void oled_draw_dashboard(const OwlUiData& d){
+void oled_draw_dashboard(const OwlUiData& d, const char* ratLabel){
   u8g2.clearBuffer();
 
-  // ---------- Top ----------
-  int topY = 12;  // mini altura
-  u8g2.drawHLine(0, 16, 256);   // separador
+  // ---------- Top (compacto) ----------
+  const int topY = 11;
+  u8g2.drawHLine(0, 15, 256);
 
   // CEL
-  drawAntennaMini(6, topY);
+  drawAntennaMini(4, topY);
   uint8_t bars = csq_to_bars(d.csq);
-  drawBarsMini(14, topY, clampi(bars,0,5), 5, 2, 2);
+  drawBarsMini(12, topY, clampi(bars,0,5), 5, 2, 1);
   u8g2.setFont(u8g2_font_5x8_tf);
-  u8g2.drawStr(14 + 5*(2+2) + 4, topY, "CEL");
+  const char* rlab = (ratLabel && ratLabel[0]) ? ratLabel : "--";
+  u8g2.drawStr(12 + 5*(2+1) + 4, topY, rlab);   // 2G/3G/4G/5G/--
 
   // GPS centro top
-  int xgps = 104;
+  int xgps = 102;
   drawSatelliteMini(xgps, topY);
-  char gpsBuf[20];
+  char gpsBuf[16];
   if (d.sats >= 0) snprintf(gpsBuf, sizeof(gpsBuf), "GPS %02d", d.sats);
   else             snprintf(gpsBuf, sizeof(gpsBuf), "GPS --");
-  u8g2.drawStr(xgps + 14, topY, gpsBuf);
+  u8g2.drawStr(xgps + 12, topY, gpsBuf);
 
   // IR derecha top
   int xir = 190;
   drawGlobeMini(xir, topY);
   if (d.iridiumLvl < 0) {
-    u8g2.drawStr(xir + 14, topY, "IR --");
+    u8g2.drawStr(xir + 12, topY, "IR --");
   } else {
     uint8_t irBars = clampi(d.iridiumLvl, 0, 5);
-    drawBarsMini(xir + 14, topY, irBars, 5, 2, 2);
-    u8g2.drawStr(xir + 14 + 5*(2+2) + 4, topY, "IR");
+    drawBarsMini(xir + 12, topY, irBars, 5, 2, 1);
+    u8g2.drawStr(xir + 12 + 5*(2+1) + 4, topY, "IR");
   }
 
   // Mensajes (contador en top derecha)
   String sMsgTop = fmtMsgs(d.msgRx);
   int wMsgTop = u8g2.getStrWidth(sMsgTop.c_str());
-  u8g2.drawStr(256 - 6 - wMsgTop, topY, sMsgTop.c_str());
+  u8g2.drawStr(256 - 4 - wMsgTop, topY, sMsgTop.c_str());
 
   // ---------- Centro ----------
   u8g2.setFont(u8g2_font_6x12_tf);
@@ -158,32 +163,31 @@ void oled_draw_dashboard(const OwlUiData& d){
   String sAlt = fmtAlt(d.alt);
   String sSpd = fmtSpeed(d.speed_mps);
 
-  u8g2.drawStr(6, 34,  sLat.c_str());
-  u8g2.drawStr(90, 34, sLon.c_str());
+  u8g2.drawStr(4, 33,  sLat.c_str());
+  u8g2.drawStr(90, 33, sLon.c_str());
   int wAlt = u8g2.getStrWidth(sAlt.c_str());
-  u8g2.drawStr(256 - 6 - wAlt, 34, sAlt.c_str());
+  u8g2.drawStr(256 - 4 - wAlt, 33, sAlt.c_str());
 
-  // Spd debajo de Alt (simetría)
+  // Spd debajo de Alt
   int wSpd = u8g2.getStrWidth(sSpd.c_str());
-  u8g2.drawStr(256 - 6 - wSpd, 48, sSpd.c_str());
+  u8g2.drawStr(256 - 4 - wSpd, 47, sSpd.c_str());
 
   // separador sección inferior
-  u8g2.drawHLine(0, 52, 256);
+  u8g2.drawHLine(0, 51, 256);
 
   // ---------- Inferior ----------
   String sPdop = fmtPdop(d.pdop);
   String sUtc  = fmtUtc(d.utc);
 
-  u8g2.drawStr(6, 62, sPdop.c_str());                  // izq
+  u8g2.drawStr(4, 61, sPdop.c_str());                  // izq
   int wUtc = u8g2.getStrWidth(sUtc.c_str());
-  u8g2.drawStr((256 - wUtc)/2, 62, sUtc.c_str());      // centro
+  u8g2.drawStr((256 - wUtc)/2, 61, sUtc.c_str());      // centro
 
   u8g2.sendBuffer();
 }
 
 // =============================================================
 //  GPS DETAIL
-//  - Sin barra superior, más info: Trk con cardinal
 // =============================================================
 static const char* cardinal(float deg) {
   if (isnan(deg)) return "---";
@@ -259,7 +263,7 @@ void oled_draw_iridium_detail(bool present, int sigLevel, int unread, const Stri
 }
 
 // =============================================================
-//  GSM DETAIL (nuevo)
+//  GSM DETAIL
 // =============================================================
 void oled_draw_gsm_detail(const OwlUiData& d,
                           const String& imei,
@@ -290,7 +294,7 @@ void oled_draw_gsm_detail(const OwlUiData& d,
 }
 
 // =============================================================
-//  BLE DETAIL (nuevo)
+//  BLE DETAIL
 // =============================================================
 void oled_draw_ble_detail(bool connected, const String& devName)
 {
@@ -315,8 +319,7 @@ void oled_draw_ble_detail(bool connected, const String& devName)
 }
 
 // =============================================================
-//  SYS CONFIG (ya presente en tu proyecto) y MESSAGES (stub)
-//  — deja tus implementaciones actuales si ya existen —
+//  SYS CONFIG y MESSAGES
 // =============================================================
 void oled_draw_sys_config(const OwlUiData& d, bool netReg, bool pdpUp,
                           const String& ip, bool sdOk, bool i2cOk, const char* fw) {
@@ -360,8 +363,9 @@ void oled_draw_messages(uint16_t unread, const String& last){
   u8g2.sendBuffer();
 }
 
-#include "settings.h"  // para LinkPref
-
+// =============================================================
+//  TESTING
+// =============================================================
 static const char* pref_to_cstr(LinkPref p){
   switch(p){
     case LinkPref::AUTO:     return "AUTO";
@@ -394,9 +398,7 @@ void oled_draw_testing(LinkPref pref, const char* lastResult, bool busy){
   {
     String lr = String("Last: ") + (lastResult && *lastResult ? lastResult : "--");
     int w = u8g2.getStrWidth(lr.c_str());
-    if (w > 244) { // truncado simple
-      // dibuja los primeros chars que quepan
-      // (opcional: podrías hacer un scroll marquee si quieres)
+    if (w > 244) {
       u8g2.drawStr(6, 62, lr.substring(0, 40).c_str());
     } else {
       u8g2.drawStr(6, 62, lr.c_str());
@@ -404,11 +406,8 @@ void oled_draw_testing(LinkPref pref, const char* lastResult, bool busy){
   }
 
   // Indicador de actividad (busy)
-  if (busy) {
-    u8g2.drawStr(200, 14, "RUN...");
-  } else {
-    u8g2.drawStr(200, 14, "IDLE");
-  }
+  if (busy) u8g2.drawStr(200, 14, "RUN...");
+  else      u8g2.drawStr(200, 14, "IDLE");
 
   u8g2.sendBuffer();
 }

@@ -1,7 +1,7 @@
 #pragma once
 #include <Arduino.h>
 
-// --- si no incluyes settings.h aquí, haz un forward-declare:
+// forward-declare si no incluyes settings.h aquí
 enum class LinkPref : uint8_t;
 
 struct OwlUiData {
@@ -21,7 +21,10 @@ struct OwlUiData {
 
 bool oled_init();
 void oled_splash(const char* title);
-void oled_draw_dashboard(const OwlUiData& d);
+
+// === CAMBIO AQUÍ: añadimos ratLabel ===
+void oled_draw_dashboard(const OwlUiData& d, const char* ratLabel);
+
 void oled_draw_gps_detail(const OwlUiData& d);
 void oled_draw_iridium_detail(bool present, int sigLevel, int unread, const String& imei);
 void oled_draw_sys_config(const OwlUiData& d, bool netReg, bool pdpUp,
@@ -32,5 +35,5 @@ void oled_draw_messages(uint16_t unread, const String& last);
 void oled_draw_gsm_detail(const OwlUiData& d, const String& imei, bool netReg, bool pdpUp, int rssiDbm);
 void oled_draw_ble_detail(bool connected, const String& devName);
 
-// === NUEVA: Pantalla de Testing ===
+// === Pantalla Testing existente ===
 void oled_draw_testing(LinkPref pref, const char* lastResult, bool busy);

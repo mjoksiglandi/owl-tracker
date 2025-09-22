@@ -1,4 +1,5 @@
 #include "board_pins.h"
+#include <stdarg.h>  
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
@@ -6,8 +7,8 @@
 #include <SD.h>
 #include <WiFi.h>
 #include <TinyGsmClient.h>
-#include "comms_mode.h"   // Modo de comunicaciones (AUTO / GSM / IR / BOTH)
-#include "settings.h"     // Define LinkPref (AUTO, GSM_ONLY, IR_ONLY, BOTH)
+#include "comms_mode.h"   // Modo de comunicaciones
+#include "settings.h"     // LinkPref (AUTO/GSM_ONLY/IR_ONLY/BOTH)
 
 // Núcleo
 #include "modem_config.h"
@@ -29,6 +30,7 @@
 // FreeRTOS
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 // UARTs
 HardwareSerial SerialAT(1);
@@ -40,7 +42,7 @@ OwlHttpClient http(modem, gsmClient, netcfg::HOST, netcfg::PORT);
 
 SPIClass hspi(HSPI);
 
-// Estado global
+// ======== Estado global ========
 static bool sd_ok = false;
 static bool g_mag_ok = false;
 static bool ble_ok = false;
@@ -56,15 +58,31 @@ static int g_next_report_type = 1; // 1=Normal, 2=Emergencia, 3=Libre, 4=POI
 static char g_last_test[64] = {0};
 static volatile bool g_test_busy = false;
 
+// ======== Caches de red para UI (solo los escribe net_task) ========
+static volatile int     g_csq_cache = 99;
+static char             g_rat_label[6] = "--";
+static String           g_ip_cache = "";
+
+// ======== Mutex para acceso AT (TinyGSM no es thread-safe) ========
+static SemaphoreHandle_t g_modem_mtx = nullptr;
+static inline bool modem_lock(uint32_t ms=1000){
+  if (!g_modem_mtx) return false;
+  return xSemaphoreTake(g_modem_mtx, pdMS_TO_TICKS(ms)) == pdTRUE;
+}
+static inline void modem_unlock(){
+  if (g_modem_mtx) xSemaphoreGive(g_modem_mtx);
+}
+
 // ===================== LOG helpers ===========================
 static inline void LOG(const char *s){
   if (Serial) Serial.println(s);
 }
-static inline void LOGF(const char *fmt, ...){
+static inline void LOGF(const char *fmt, ...) {
   if (!Serial) return;
   char buf[192];
-  va_list ap; va_start(ap, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);  // <-- el orden correcto: fmt, ap
   va_end(ap);
   Serial.println(buf);
 }
@@ -106,7 +124,7 @@ static bool i2c_probe(uint8_t addr){
 
 // ===================== Red (tarea) ===========================
 static void net_task(void *arg){
-  enum class NState { ST_POWER, ST_AT_PROBE, ST_SET_LTE, ST_REG_WAIT, ST_PDP_UP, ST_RUN, ST_SLEEP };
+  enum class NState { ST_POWER, ST_AT_PROBE, ST_REG_WAIT, ST_PDP_UP, ST_RUN, ST_SLEEP };
   NState st = NState::ST_POWER;
 
   uint32_t backoff_ms = 2000;
@@ -135,14 +153,8 @@ static void net_task(void *arg){
           st = NState::ST_SLEEP;
           break;
         }
-        st = NState::ST_SET_LTE;
-      } break;
-
-      case NState::ST_SET_LTE: {
-        if (!modem_set_lte(modem)){
-          LOG("[NET] LTE only falló -> AUTO");
-          modem_set_auto(modem);
-        }
+        // Dejar el módem en AUTO (sin forzar LTE-only)
+        modem_set_auto(modem);
         st = NState::ST_REG_WAIT;
       } break;
 
@@ -177,6 +189,34 @@ static void net_task(void *arg){
         if (!reg || !pdp){
           LOG("[NET] RUN->SLEEP");
           st = NState::ST_SLEEP;
+          break;
+        }
+
+        // ====== REFRESCOS PERIÓDICOS (1 vez cada iteración ~3 s) ======
+        if (modem_lock(500)){
+          // CSQ
+          int csq = modem.getSignalQuality();
+          g_csq_cache = (csq < 0 ? 99 : csq);
+
+          // RAT label (2G/3G/4G/5G)
+          String r = modem_rat_label(modem);
+          r.toCharArray((char*)g_rat_label, sizeof(g_rat_label));
+
+          // IP (si hay PDP)
+          if (pdp){
+            IPAddress ip = modem.localIP();
+            g_ip_cache = ip.toString();
+          } else {
+            g_ip_cache = "";
+          }
+
+          // IMEI (una vez)
+          if (g_gsm_imei.length() == 0 && reg){
+            String imeiTry = modem.getIMEI();
+            if (imeiTry.length() > 0) g_gsm_imei = imeiTry;
+          }
+
+          modem_unlock();
         }
       } break;
 
@@ -227,6 +267,8 @@ void setup(){
   delay(50);
   LOG("\n[Owl] Boot");
 
+  g_modem_mtx = xSemaphoreCreateMutex();
+
   // RF: solo BLE (Wi-Fi OFF)
   WiFi.mode(WIFI_OFF);
 
@@ -235,7 +277,7 @@ void setup(){
   oled_splash("Owl Tracker");
   delay(400);
 
-  // HOME “en vacío” para confirmar vida
+  // HOME “en vacío”
   {
     OwlUiData bootUi;
     bootUi.csq = 99;
@@ -245,7 +287,7 @@ void setup(){
     bootUi.lat = bootUi.lon = bootUi.alt = NAN;
     bootUi.utc = "";
     bootUi.msgRx = 0;
-    oled_draw_dashboard(bootUi);
+    oled_draw_dashboard(bootUi, "--");
   }
 
   // Botonera
@@ -270,7 +312,7 @@ void setup(){
     LOG("[I2C] IST8310 no detectado");
   }
 
-  // **Iridium por I2C** (solo si hay ACK @0x63)
+  // **Iridium por I2C** (0x63)
   bool ir_ok = false;
   if (i2c_probe(IRIDIUM_I2C_ADDR)){
     ir_ok = iridium_begin();
@@ -293,6 +335,52 @@ void setup(){
 
 // ===================== LOOP =================================
 void loop(){
+  // ---------- BOTONES: prioridad máxima (cada ~2 ms) ----------
+  static uint32_t t_btn = 0;
+  if (millis() - t_btn >= 2){
+    t_btn = millis();
+    buttons_poll();
+
+    // BTN1: short = HOME, long/repeat = ciclo pantallas
+    if (auto e = btn1_get(); true){
+      if (e.shortPress){
+        g_screen = UiScreen::HOME;
+      }
+      if (e.longPress || e.repeat){
+        g_screen = ui_next(g_screen);
+      }
+    }
+
+    // BTN2: short = MESSAGES, long = POI
+    if (auto e2 = btn2_get(); true){
+      if (e2.shortPress){
+        g_screen = UiScreen::MESSAGES;
+      }
+      if (e2.longPress){
+        save_poi();
+      }
+    }
+
+    // BTN3: long = SOS
+    if (auto e3 = btn3_get(); e3.longPress){
+      sos_trigger();
+    }
+
+    // BTN4: short = rota modo, long = TESTING
+    if (auto e4 = btn4_get(); true){
+      if (e4.shortPress){
+        auto m = comms_mode_get();
+        m = comms_mode_next(m);
+        comms_mode_set(m);
+        const char* name = comms_mode_name(m);
+        snprintf(g_last_test, sizeof(g_last_test), "Mode -> %s", name ? name : "AUTO");
+      }
+      if (e4.longPress){
+        g_screen = UiScreen::TESTING;
+      }
+    }
+  }
+
   // Sensores no bloqueantes
   gps_poll(SerialGPS);
   if (g_mag_ok) mag_poll();
@@ -303,47 +391,6 @@ void loop(){
   // BLE
   ble_poll();
 
-  // ----------------- Botones (10 ms) -----------------
-  static uint32_t t_btn = 0;
-  if (millis() - t_btn >= 10){
-    t_btn = millis();
-    buttons_poll();
-
-    if (auto e = btn1_get(); e.shortPress){
-      g_screen = UiScreen::HOME;
-      LOG("[Owl] HOME");
-    } else if (e.longPress){
-      g_screen = ui_next(g_screen);   // helper del enum
-      LOG("[Owl] Cambiar pantalla");
-    }
-
-    if (auto e2 = btn2_get(); e2.shortPress){
-      g_screen = UiScreen::MESSAGES;
-      LOG("[Owl] MESSAGES");
-    } else if (e2.longPress){
-      save_poi();
-    }
-
-    if (auto e3 = btn3_get(); e3.longPress){
-      sos_trigger();
-    }
-
-    // --- BTN4: TESTING ---
-    // corto: rota CommsMode y deja rastro en "last"
-    // largo: abre pantalla TESTING
-    if (auto e4 = btn4_get(); e4.shortPress){
-      auto m = comms_mode_get();
-      m = comms_mode_next(m);
-      comms_mode_set(m);
-      const char* name = comms_mode_name(m);
-      snprintf(g_last_test, sizeof(g_last_test), "Mode -> %s", name ? name : "AUTO");
-      Serial.printf("[TEST] %s\n", g_last_test);
-    } else if (e4.longPress){
-      g_screen = UiScreen::TESTING;
-      Serial.println("[TEST] Open TESTING screen");
-    }
-  }
-
   // ----------------- UI (1 Hz) + BLE report -----------------
   static uint32_t t_ui = 0;
   if (millis() - t_ui >= 1000){
@@ -352,9 +399,9 @@ void loop(){
     GpsFix fx = gps_last_fix();
     IridiumInfo ir = iridium_status();
 
-    // ------- UI data -------
+    // ------- UI data (sin AT: usamos caches) -------
     OwlUiData ui;
-    ui.csq = modem.getSignalQuality();
+    ui.csq = g_csq_cache;                 // cache
     ui.iridiumLvl = (ir.sig >= 0) ? ir.sig : -1; // 0..5 o -1
     ui.lat = fx.valid ? fx.lat : NAN;
     ui.lon = fx.valid ? fx.lon : NAN;
@@ -363,17 +410,11 @@ void loop(){
     ui.pdop = fx.pdop;
     ui.speed_mps = fx.speed_mps;
     ui.course_deg = fx.course_deg;
-    ui.pressure_hpa = NAN;         // baro removido
-    ui.msgRx = ir.waiting ? 1 : 0; // 1 si hay MT en red
+    ui.pressure_hpa = NAN;
+    ui.msgRx = ir.waiting ? 1 : 0;
     ui.utc = fx.utc.length() ? (fx.utc + "Z") : String("");
 
-    // ------- IMEI GSM (cachea una vez) -------
-    if (g_gsm_imei.length() == 0 && g_net_registered){
-      String imeiTry = modem.getIMEI();
-      if (imeiTry.length() > 0) g_gsm_imei = imeiTry;
-    }
-
-    // ------- Reporte BLE JSON unificado -------
+    // ------- Reporte BLE JSON -------
     OwlReport rpt;
     rpt.tipoReporte = g_next_report_type; // 1 normal salvo eventos
 
@@ -409,7 +450,7 @@ void loop(){
     if (needRedraw){
       switch (g_screen){
         case UiScreen::HOME:
-          oled_draw_dashboard(ui);
+          oled_draw_dashboard(ui, g_rat_label);
           break;
 
         case UiScreen::GPS_DETAIL:
@@ -421,8 +462,8 @@ void loop(){
           break;
 
         case UiScreen::SYS_CONFIG: {
-          const String ipStr = modem.localIP().toString();
-          const bool i2cOk = (g_mag_ok || ir.present); // I2C OK si MAG o IR presentes
+          const String ipStr = g_ip_cache;
+          const bool i2cOk = (g_mag_ok || ir.present);
           String fwStr = String("fw 1.0.0 ") + (ble_ok ? "BLE:OK" : "BLE:NO");
           oled_draw_sys_config(ui, g_net_registered, g_pdp_up, ipStr, sd_ok, i2cOk, fwStr.c_str());
         } break;
@@ -449,7 +490,7 @@ void loop(){
         } break;
 
         case UiScreen::TESTING: {
-          LinkPref pref = linkpref_from_comms();          // <-- tipo correcto
+          LinkPref pref = linkpref_from_comms();
           oled_draw_testing(pref, g_last_test, g_test_busy);
         } break;
       }
