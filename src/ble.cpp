@@ -4,14 +4,16 @@
 #include <cmath>     // std::isnan
 #include <cstdio>    // std::snprintf
 
-#include "crypto.h"    // owl_encrypt_aes256gcm_base64(...)
+// Ya no necesitamos cifrar para BLE, pero dejamos includes por si reutilizas en otro lado
+#include "crypto.h"    // owl_encrypt_aes256gcm_base64(.)
 #include "secrets.h"   // OWL_AES256_KEY[32], OWL_GCM_IV_LEN
+
 #include "ble.h"
-#include "report.h"    // <-- define OwlReport
+#include "report.h"    // OwlReport
 
 // ===== UUIDs =====
 static const char* UUID_SVC         = "D9A00001-5F2F-4B6F-9F7C-6F0A4BF50001";
-static const char* UUID_CHAR_REPORT = "D9A00002-5F2F-4B6F-9F7C-6F0A4BF50002"; // JSON cifrado
+static const char* UUID_CHAR_REPORT = "D9A00002-5F2F-4B6F-9F7C-6F0A4BF50002"; // JSON (ahora en claro)
 static const char* UUID_CHAR_INFO   = "D9A00003-5F2F-4B6F-9F7C-6F0A4BF50003"; // estado
 
 // ===== Objetos BLE =====
@@ -70,25 +72,10 @@ bool ble_begin(const char* devName) {
 
 bool ble_is_connected() { return g_connected; }
 
-/** Cifra JSON con AES-256-GCM y notifica por BLE (Base64). */
+/** AHORA: Notifica por BLE el JSON EN CLARO (sin cifrar) */
 bool ble_notify_report_json(const String& jsonPlain) {
   if (!g_chReport) return false;
-
-  // IV aleatorio (OWL_GCM_IV_LEN normalmente 12)
-  uint8_t iv[OWL_GCM_IV_LEN];
-  for (size_t i = 0; i < OWL_GCM_IV_LEN; ++i) {
-    iv[i] = (uint8_t)(esp_random() & 0xFF);
-  }
-
-  // Cifrar y obtener Base64 usando tu crypto.cpp
-  String b64 = owl_encrypt_aes256gcm_base64(
-    OWL_AES256_KEY,
-    (const uint8_t*)jsonPlain.c_str(), jsonPlain.length(),
-    iv, sizeof(iv)
-  );
-  if (!b64.length()) return false;
-
-  g_chReport->setValue(b64);
+  g_chReport->setValue(jsonPlain);
   if (g_connected) g_chReport->notify(true);
   return true;
 }
@@ -106,7 +93,7 @@ void ble_set_name(const char* newName) {
 }
 
 // ===== Compatibilidad con tu main =====
-void ble_poll() {}  // placeholder
+void ble_poll() {}  // no-op
 
 bool ble_update(const String& jsonPlain) {
   return ble_notify_report_json(jsonPlain);

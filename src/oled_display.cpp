@@ -3,17 +3,14 @@
 #include <U8g2lib.h>
 #include "board_pins.h"
 #include "oled_display.h"
-#include "settings.h"   
+#include "settings.h"   // para LinkPref en oled_draw_testing
 
 // HW SPI SSD1322 256x64
 U8G2_SSD1322_NHD_256X64_F_4W_HW_SPI u8g2(
   U8G2_R0, /*cs=*/OLED_PIN_CS, /*dc=*/OLED_PIN_DC, /*reset=*/OLED_PIN_RST
 );
 
-// -------- utilidades internas --------
 static inline int clampi(int v, int lo, int hi){ return v<lo?lo:(v>hi?hi:v); }
-static inline float nzf(float v){ return isnan(v)?0.0f:v; }
-static inline double nzd(double v){ return isnan(v)?0.0:v; }
 
 // ---------------- CSQ->barras (0..5) ----------------
 static uint8_t csq_to_bars(int csq){
@@ -40,11 +37,6 @@ static String fmtAlt(double a){
 static String fmtSpeed(float s){
   if (isnan(s)) return "Spd: --.- m/s";
   char buf[24]; snprintf(buf, sizeof(buf), "Spd: %.1f m/s", s);
-  return String(buf);
-}
-static String fmtCourse(float c){
-  if (isnan(c)) return "Trk: ---";
-  char buf[20]; snprintf(buf, sizeof(buf), "Trk: %.0f", c);
   return String(buf);
 }
 static String fmtPdop(float p){
@@ -83,15 +75,13 @@ void oled_splash(const char* title){
 }
 
 // ---------------- Iconos mini (10 px alto) ----------------
-static void drawAntennaMini(int x, int y){ // base en y
-  // más compacto: ~10px alto total
+static void drawAntennaMini(int x, int y){
   u8g2.drawBox(x,   y-7, 2, 7);
   u8g2.drawBox(x-2, y-3, 6, 2);
 }
 static void drawBarsMini(int x, int y, uint8_t level, uint8_t maxBars, uint8_t w=2, uint8_t step=1){
-  // barras más finas y cercanas
   for (uint8_t i=0;i<maxBars;i++){
-    int h  = 1 + i*2;              // 1,3,5,7,9
+    int h  = 1 + i*2;
     int yy = y - h;
     int xx = x + i*(w+step);
     if (i < level) u8g2.drawBox(xx, yy, w, h);
@@ -112,15 +102,11 @@ static void drawGlobeMini(int x, int y){
 
 // =============================================================
 //  HOME / DASHBOARD
-//  - Top mini-icons (compactos) + barras (CEL con RAT label) + MSG
-//  - Separadores horizontales
-//  - Centro: Lat | Lon | Alt   (y debajo Spd)
-//  - Inferior: PDOP | UTC
 // =============================================================
 void oled_draw_dashboard(const OwlUiData& d, const char* ratLabel){
   u8g2.clearBuffer();
 
-  // ---------- Top (compacto) ----------
+  // ---------- Top ----------
   const int topY = 11;
   u8g2.drawHLine(0, 15, 256);
 
@@ -168,20 +154,18 @@ void oled_draw_dashboard(const OwlUiData& d, const char* ratLabel){
   int wAlt = u8g2.getStrWidth(sAlt.c_str());
   u8g2.drawStr(256 - 4 - wAlt, 33, sAlt.c_str());
 
-  // Spd debajo de Alt
   int wSpd = u8g2.getStrWidth(sSpd.c_str());
   u8g2.drawStr(256 - 4 - wSpd, 47, sSpd.c_str());
 
-  // separador sección inferior
   u8g2.drawHLine(0, 51, 256);
 
   // ---------- Inferior ----------
   String sPdop = fmtPdop(d.pdop);
   String sUtc  = fmtUtc(d.utc);
 
-  u8g2.drawStr(4, 61, sPdop.c_str());                  // izq
+  u8g2.drawStr(4, 61, sPdop.c_str());
   int wUtc = u8g2.getStrWidth(sUtc.c_str());
-  u8g2.drawStr((256 - wUtc)/2, 61, sUtc.c_str());      // centro
+  u8g2.drawStr((256 - wUtc)/2, 61, sUtc.c_str());
 
   u8g2.sendBuffer();
 }
@@ -214,7 +198,6 @@ void oled_draw_gps_detail(const OwlUiData& d){
   u8g2.drawStr(6, 48, s1.c_str());
   u8g2.drawStr(6, 62, s2.c_str());
 
-  // Alt + Spd + Trk (con cardinal)
   String sAlt = fmtAlt(d.alt);
   String sSpd = fmtSpeed(d.speed_mps);
   String sTrk = String("Trk: ") + (isnan(d.course_deg)?"---":String(d.course_deg,0)) +
@@ -224,7 +207,6 @@ void oled_draw_gps_detail(const OwlUiData& d){
   int wSpd = u8g2.getStrWidth(sSpd.c_str());
   int wTrk = u8g2.getStrWidth(sTrk.c_str());
 
-  // Columna derecha (arriba-abajo)
   u8g2.drawStr(256-6-wAlt, 34, sAlt.c_str());
   u8g2.drawStr(256-6-wSpd, 48, sSpd.c_str());
   u8g2.drawStr(256-6-wTrk, 62, sTrk.c_str());
@@ -233,7 +215,7 @@ void oled_draw_gps_detail(const OwlUiData& d){
 }
 
 // =============================================================
-//  IRIDIUM DETAIL (simple)
+//  IRIDIUM DETAIL
 // =============================================================
 void oled_draw_iridium_detail(bool present, int sigLevel, int unread, const String& imei){
   u8g2.clearBuffer();
@@ -254,7 +236,6 @@ void oled_draw_iridium_detail(bool present, int sigLevel, int unread, const Stri
   String sIMEI = String("IMEI: ") + (imei.length()?imei:"--");
   u8g2.drawStr(6, 62, sIMEI.c_str());
 
-  // Unread (derecha)
   String sU = String("MT: ") + (unread>=0?String(unread):String("--"));
   int wU = u8g2.getStrWidth(sU.c_str());
   u8g2.drawStr(256-6-wU, 34, sU.c_str());
@@ -338,7 +319,6 @@ void oled_draw_sys_config(const OwlUiData& d, bool netReg, bool pdpUp,
   char ln2[64]; snprintf(ln2, sizeof(ln2), "SD: %s   I2C: %s", sdOk?"OK":"NO", i2cOk?"OK":"NO");
   u8g2.drawStr(6, 62, ln2);
 
-  // fw a la derecha
   int w = u8g2.getStrWidth(fw);
   u8g2.drawStr(256-6-w, 34, fw);
 
@@ -364,7 +344,7 @@ void oled_draw_messages(uint16_t unread, const String& last){
 }
 
 // =============================================================
-//  TESTING
+//  TESTING (simple, compat)
 // =============================================================
 static const char* pref_to_cstr(LinkPref p){
   switch(p){
@@ -375,39 +355,95 @@ static const char* pref_to_cstr(LinkPref p){
     default:                 return "--";
   }
 }
-
 void oled_draw_testing(LinkPref pref, const char* lastResult, bool busy){
   u8g2.clearBuffer();
 
   u8g2.setFont(u8g2_font_7x14_tf);
-  u8g2.drawStr(6, 14, "Testing");
+  u8g2.drawStr(6, 14, "Testing (legacy)");
   u8g2.drawHLine(0, 18, 256);
 
   u8g2.setFont(u8g2_font_6x12_tf);
+  String ln = String("Pref: ") + pref_to_cstr(pref);
+  u8g2.drawStr(6, 34, ln.c_str());
 
-  // Línea preferencia
-  {
-    String ln = String("Pref: ") + pref_to_cstr(pref) + "   (BTN2 to change)";
-    u8g2.drawStr(6, 34, ln.c_str());
+  String lr = String("Last: ") + (lastResult && *lastResult ? lastResult : "--");
+  u8g2.drawStr(6, 48, lr.c_str());
+
+  u8g2.drawStr(200, 14, busy ? "RUN..." : "IDLE");
+  u8g2.sendBuffer();
+}
+
+// =============================================================
+//  TESTING avanzado (paginado, no ejecuta)
+// =============================================================
+void oled_draw_testing_adv(
+  const char* modeName, bool netReg, bool pdpUp,
+  const char* ratLabel, int csq, int rssiDbm, const char* ipStr,
+  const char* imeiGsm,
+  bool irPresent, int irSig, const char* irImei, int irUnread,
+  bool bleConn, uint32_t freeHeap,
+  const char* lastResult, bool busy, uint8_t page
+){
+  u8g2.clearBuffer();
+
+  // Header
+  u8g2.setFont(u8g2_font_7x14_tf);
+  char title[32];
+  snprintf(title, sizeof(title), "Testing P%u/2", (unsigned)(page+1));
+  u8g2.drawStr(6, 14, title);
+  u8g2.drawHLine(0, 18, 256);
+  u8g2.setFont(u8g2_font_6x12_tf);
+
+  if (page == 0) {
+    // -------- Página 1: Red móvil --------
+    char ln1[64];
+    snprintf(ln1, sizeof(ln1), "Mode: %s   RAT: %s", modeName?modeName:"--", ratLabel?ratLabel:"--");
+    u8g2.drawStr(6, 32, ln1);
+
+    char ln2[64];
+    snprintf(ln2, sizeof(ln2), "CSQ: %d  RSSI: %d dBm", csq, rssiDbm);
+    u8g2.drawStr(6, 44, ln2);
+
+    char ln3[64];
+    snprintf(ln3, sizeof(ln3), "Reg: %s   PDP: %s", netReg?"YES":"NO", pdpUp?"UP":"DOWN");
+    u8g2.drawStr(6, 56, ln3);
+
+    String ips = String("IP: ") + (ipStr && *ipStr ? ipStr : "--");
+    u8g2.drawStr(6, 68, ips.c_str());
+  } else {
+    // -------- Página 2: Radios/IDs/Sistema --------
+    String g = String("GSM IMEI: ") + (imeiGsm && *imeiGsm?imeiGsm:"--");
+    u8g2.drawStr(6, 32, g.c_str());
+
+    char ir1[64];
+    snprintf(ir1, sizeof(ir1), "IR: %s  SIG:%s  MT:%s",
+             irPresent?"YES":"NO",
+             (irSig>=0? String(irSig).c_str() : "--"),
+             (irUnread>=0? String(irUnread).c_str() : "--") );
+    u8g2.drawStr(6, 44, ir1);
+
+    String ir2 = String("IR IMEI: ") + (irImei && *irImei?irImei:"--");
+    u8g2.drawStr(6, 56, ir2.c_str());
+
+    char sys[64];
+    snprintf(sys, sizeof(sys), "BLE:%s  Heap:%lu",
+             bleConn?"ON":"OFF", (unsigned long)freeHeap);
+    u8g2.drawStr(6, 68, sys);
   }
 
-  // Línea acción
-  u8g2.drawStr(6, 48, "BTN3: Quick Test (GSM ping / IR MO)");
-
-  // Resultado
-  {
-    String lr = String("Last: ") + (lastResult && *lastResult ? lastResult : "--");
-    int w = u8g2.getStrWidth(lr.c_str());
-    if (w > 244) {
-      u8g2.drawStr(6, 62, lr.substring(0, 40).c_str());
-    } else {
-      u8g2.drawStr(6, 62, lr.c_str());
-    }
+  // Estado “busy/idle” y última acción
+  u8g2.setFont(u8g2_font_6x12_tf);
+  u8g2.drawStr(200, 14, busy ? "RUN..." : "IDLE");
+  String lr = String("Last: ") + (lastResult && *lastResult ? lastResult : "--");
+  int w = u8g2.getStrWidth(lr.c_str());
+  if (w > 246) {
+    u8g2.drawStr(6, 24, lr.substring(0, 40).c_str());
+  } else {
+    u8g2.drawStr(6, 24, lr.c_str());
   }
 
-  // Indicador de actividad (busy)
-  if (busy) u8g2.drawStr(200, 14, "RUN...");
-  else      u8g2.drawStr(200, 14, "IDLE");
-
+  // Pie de ayuda
+  u8g2.setFont(u8g2_font_5x8_tf);
+  u8g2.drawStr(6, 80, "BTN1: next page | BTN4 long: exit");
   u8g2.sendBuffer();
 }
