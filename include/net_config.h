@@ -2,15 +2,22 @@
 #include <Arduino.h>
 
 namespace netcfg {
-inline const char* APN      = "internet.wom.cl";  // WOM Chile
-inline const char* APN_USER = "";
-inline const char* APN_PASS = "";
 
-// Aún sin destino API:
-inline const char* HOST = "example.com";
-inline const uint16_t PORT = 80;
-inline const char* PATH = "/noop";
-inline const char* AUTH_BEARER = "";
-inline const char* ROOT_CA = R"( )";
-inline const uint32_t PUT_PERIOD_MS = 5000;
-}
+// ≡ Datos de red (ajusta a tu operador/backend)
+inline const char* APN       = "internet.wom.cl";
+inline const char* APN_USER  = "";
+inline const char* APN_PASS  = "";
+
+inline const char* HOST      = "example.com";
+inline const uint16_t PORT   = 80;
+// Endpoints opcionales (si usas distintos para claro/cifrado)
+inline const char* PATH_PLAIN = "/plain";
+inline const char* PATH_GCM   = "/gcm";
+
+inline const char* AUTH_BEARER = "";    // "Bearer xxx" si aplica
+inline const char* ROOT_CA     = R"( )";
+
+// ≡ Períodos
+inline const uint32_t UPLINK_PERIOD_MS = 10000;  // ← 10 s para GSM, Iridium y BLE
+
+} // namespace netcfg

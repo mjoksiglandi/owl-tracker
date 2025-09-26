@@ -68,9 +68,14 @@ static volatile int     g_csq_cache = 99;
 static char             g_rat_label[6] = "--";
 static String           g_ip_cache = "";
 
+// ======== Preferencia dinámica de portador ========
+static bool g_pref_iridium = false;           // true si no hay PDP sostenido
+static uint32_t g_no_pdp_since_ms = 0;        // cuándo empezó a faltar PDP
+static uint32_t g_pdp_ok_since_ms = 0;        // cuándo volvió PDP
+
 // ======== Mutex TinyGSM ========
 static SemaphoreHandle_t g_modem_mtx = nullptr;
-static inline bool modem_lock(uint32_t ms=1000){
+static inline bool modem_lock(uint32_t ms=15000){
   if (!g_modem_mtx) return false;
   return xSemaphoreTake(g_modem_mtx, pdMS_TO_TICKS(ms)) == pdTRUE;
 }
@@ -125,6 +130,13 @@ static bool i2c_probe(uint8_t addr){
   return (Wire.endTransmission() == 0);
 }
 
+// ===== Iridium enqueue (stub opcional) =====
+// Si ya tienes una API real para enviar por Iridium, reemplaza esta función por tu llamada.
+static bool iridium_send_json_stub(const String& s) {
+  Serial.printf("[IR] (send-json) %s\n", s.c_str());
+  return false; // Devuelve true si tu envío real lo encola/acepta
+}
+
 // ===================== Red (tarea) ===========================
 static void net_task(void *arg){
   enum class NState { ST_POWER, ST_AT_PROBE, ST_REG_WAIT, ST_PDP_UP, ST_RUN, ST_SLEEP };
@@ -156,12 +168,15 @@ static void net_task(void *arg){
           st = NState::ST_SLEEP;
           break;
         }
-        modem_set_auto(modem); // sin forzar LTE-only
+        // RAT auto + tuning (PSM/eDRX OFF, COPS=0)
+        modem_set_auto(modem);       // ya no forzamos LTE-only
+        modem_radio_tune(modem);
         st = NState::ST_REG_WAIT;
       } break;
 
       case NState::ST_REG_WAIT: {
-        bool reg = modem_wait_for_network(modem, 5000);
+        // Ventana realista (hasta ~45 s)
+        bool reg = modem_wait_for_network(modem, 45000);
         g_net_registered = reg;
         if (!reg){
           LOG("[NET] sin registro, backoff");
@@ -172,14 +187,32 @@ static void net_task(void *arg){
       } break;
 
       case NState::ST_PDP_UP: {
+        if (!modem_lock(20000)) { st = NState::ST_SLEEP; break; }
         bool up = modem.gprsConnect(netcfg::APN, netcfg::APN_USER, netcfg::APN_PASS);
+        modem_unlock();
+
         g_pdp_up = up;
         LOGF("[NET] PDP %s", up ? "UP" : "DOWN");
-        st = up ? NState::ST_RUN : NState::ST_SLEEP;
+        if (up) {
+          modem_print_status(modem);
+          modem_dump_regs(modem); // diagnóstico adicional
+          // Reset timers de preferencia
+          g_no_pdp_since_ms = 0;
+          g_pdp_ok_since_ms = millis();
+          g_pref_iridium = false;
+          st = NState::ST_RUN;
+        } else {
+          // No hay PDP: entra a RUN igualmente (no reiniciamos), preferencia a Iridium tras 30s
+          g_no_pdp_since_ms = millis();
+          g_pdp_ok_since_ms = 0;
+          g_pref_iridium = true;
+          st = NState::ST_RUN;
+        }
       } break;
 
       case NState::ST_RUN: {
-        vTaskDelay(pdMS_TO_TICKS(3000));
+        vTaskDelay(pdMS_TO_TICKS(300));
+
         bool reg = modem.isNetworkConnected();
         g_net_registered = reg;
         #ifdef TINY_GSM_MODEM_SIM7600
@@ -188,13 +221,30 @@ static void net_task(void *arg){
           bool pdp = (modem.localIP() != IPAddress(0,0,0,0));
         #endif
         g_pdp_up = pdp;
-        if (!reg || !pdp){
-          LOG("[NET] RUN->SLEEP");
-          st = NState::ST_SLEEP;
-          break;
+
+        // Gestionar timers de preferencia sin reiniciar el módem
+        uint32_t now = millis();
+        if (pdp) {
+          if (g_pdp_ok_since_ms == 0) g_pdp_ok_since_ms = now;
+          // si PDP estable ≥10 s, quitamos preferencia Iridium
+          if (g_pdp_ok_since_ms && (now - g_pdp_ok_since_ms) >= 10000) {
+            if (g_pref_iridium) {
+              g_pref_iridium = false;
+              Serial.println("[NET] PDP estable: prioridad normal (GSM/LTE primero)");
+            }
+          }
+          g_no_pdp_since_ms = 0;
+        } else {
+          if (g_no_pdp_since_ms == 0) g_no_pdp_since_ms = now;
+          // si falta PDP ≥30 s, preferir Iridium
+          if (!g_pref_iridium && (now - g_no_pdp_since_ms) >= 30000) {
+            g_pref_iridium = true;
+            Serial.println("[NET] Sin PDP sostenido: prioridad IRIDIUM");
+          }
+          g_pdp_ok_since_ms = 0;
         }
 
-        // ====== REFRESCOS PERIÓDICOS (~3 s) ======
+        // Refrescos UI protegidos
         if (modem_lock(500)){
           int csq = modem.getSignalQuality();
           g_csq_cache = (csq < 0 ? 99 : csq);
@@ -215,6 +265,8 @@ static void net_task(void *arg){
           }
           modem_unlock();
         }
+
+        // Importante: NO hacemos hard reset ni recover aquí; el equipo permanece en RUN.
       } break;
 
       case NState::ST_SLEEP: {
@@ -297,11 +349,9 @@ static String make_json_from_report(const OwlReport& rpt) {
 }
 
 static String make_gcm_b64_from_json(const String& jsonPlain) {
-  // IV aleatorio de OWL_GCM_IV_LEN (normalmente 12)
   uint8_t iv[OWL_GCM_IV_LEN];
   for (size_t i = 0; i < OWL_GCM_IV_LEN; ++i) iv[i] = (uint8_t)(esp_random() & 0xFF);
 
-  // Devuelve un único string base64 con el paquete GCM (según tu crypto.cpp)
   String b64 = owl_encrypt_aes256gcm_base64(
     OWL_AES256_KEY,
     (const uint8_t*)jsonPlain.c_str(), jsonPlain.length(),
@@ -379,7 +429,7 @@ void loop(){
     t_btn = millis();
     buttons_poll();
 
-    // BTN1: short = HOME (si estás en TESTING: vuelve HOME), long/repeat = ciclo info normal / pág testing
+    // BTN1: short = HOME, long/repeat = ciclo info normal / pág testing
     if (auto e = btn1_get(); true){
       if (e.shortPress){
         g_screen = UiScreen::HOME;
@@ -393,7 +443,7 @@ void loop(){
       }
     }
 
-    // BTN2: short = MESSAGES (si no estás en TESTING), long = POI
+    // BTN2: short = MESSAGES, long = POI
     if (auto e2 = btn2_get(); true){
       if (e2.shortPress){
         if (g_screen != UiScreen::TESTING) {
@@ -407,7 +457,7 @@ void loop(){
       }
     }
 
-    // BTN3: long = SOS (si no estás en TESTING)
+    // BTN3: long = SOS
     if (auto e3 = btn3_get(); e3.longPress){
       if (g_screen != UiScreen::TESTING) {
         sos_trigger();
@@ -442,66 +492,84 @@ void loop(){
   iridium_poll();
   ble_poll();
 
-// ----------------- UPLINK (cada 5 s) -----------------
-static uint32_t t_uplink = 0;
-const uint32_t UPLINK_PERIOD_MS = 5000;  // 5 s fijo para pruebas
-if (millis() - t_uplink >= UPLINK_PERIOD_MS) {
-  t_uplink = millis();
+  // ----------------- UPLINK (cada 5 s) -----------------
+  static uint32_t t_uplink = 0;
+  const uint32_t UPLINK_PERIOD_MS = netcfg::UPLINK_PERIOD_MS;
+  if (millis() - t_uplink >= UPLINK_PERIOD_MS) {
+    t_uplink = millis();
 
-  // 1) Captura último fix y estatus Iridium
-  GpsFix fx = gps_last_fix();
-  IridiumInfo ir = iridium_status();
+    // 1) Captura último fix y estatus Iridium
+    GpsFix fx = gps_last_fix();
+    IridiumInfo ir = iridium_status();
 
-  // 2) Arma OwlReport base
-  OwlReport rpt;
-  rpt.tipoReporte = g_next_report_type; // 1 normal salvo eventos
-  if (g_gsm_imei.length())      rpt.IMEI = g_gsm_imei;
-  else if (ir.imei.length())    rpt.IMEI = ir.imei;
-  else                          rpt.IMEI = "";
+    // 2) Arma OwlReport base
+    OwlReport rpt;
+    rpt.tipoReporte = g_next_report_type; // 1 normal salvo eventos
+    if (g_gsm_imei.length())      rpt.IMEI = g_gsm_imei;
+    else if (ir.imei.length())    rpt.IMEI = ir.imei;
+    else                          rpt.IMEI = "";
 
-  rpt.latitud   = fx.valid ? fx.lat : NAN;
-  rpt.longitud  = fx.valid ? fx.lon : NAN;
-  rpt.altitud   = fx.valid ? fx.alt : NAN;
-  rpt.rumbo     = fx.course_deg;
-  rpt.velocidad = fx.speed_mps;
-  rpt.fechaHora = fx.utc.length() ? (fx.utc + "Z") : String("");
+    rpt.latitud   = fx.valid ? fx.lat : NAN;
+    rpt.longitud  = fx.valid ? fx.lon : NAN;
+    rpt.altitud   = fx.valid ? fx.alt : NAN;
+    rpt.rumbo     = fx.course_deg;
+    rpt.velocidad = fx.speed_mps;
+    rpt.fechaHora = fx.utc.length() ? (fx.utc + "Z") : String("");
 
-  // 3) JSON plano
-  String jsonPlain = make_json_from_report(rpt);
+    // 3) JSON plano
+    String jsonPlain = make_json_from_report(rpt);
 
-  // 4) BLE -> publicar EN CLARO (sin cifrar)
-  ble_update(jsonPlain);
+    // 4) BLE -> publicar EN CLARO (sin cifrar)
+    ble_update(jsonPlain);
 
-  // 5) HTTP -> publicar PLANO y CIFRADO (usar putJson, retorna int status)
-  String gcmB64 = make_gcm_b64_from_json(jsonPlain);
+    // 5) Envío por portador según disponibilidad/prioridad
+    if (!g_pref_iridium && g_net_registered && g_pdp_up) {
+      // GSM/LTE primero
+      String gcmB64 = make_gcm_b64_from_json(jsonPlain);
+      // a) plano
+      {
+       String pathPlain = netcfg::PATH_PLAIN;
+        if (modem_lock(200)) {
+          int code_plain = http.postJson(pathPlain.c_str(),
+                                         jsonPlain.c_str(),
+                                         netcfg::AUTH_BEARER);
+          modem_unlock();
+          Serial.printf("[HTTP] POST %s -> %d\n", pathPlain.c_str(), code_plain);
+        } else {
+          Serial.println("[HTTP] skip (modem busy)");
+        }
+      }
+      // b) cifrado
+      {
+        String pathGcm   = netcfg::PATH_GCM;
+        String body = String("{\"gcm_b64\":\"") + gcmB64 + "\"}";
+        if (modem_lock(200)) {
+          int code_gcm = http.postJson(pathGcm.c_str(),
+                                       body.c_str(),
+                                       netcfg::AUTH_BEARER);
+          modem_unlock();
+          Serial.printf("[HTTP] POST %s -> %d\n", pathGcm.c_str(), code_gcm);
+        } else {
+          Serial.println("[HTTP] skip (modem busy gcm)");
+        }
+      }
+    } else {
+      // Prioridad Iridium (sin PDP o forzada)
+      if (ir.present) {
+        // TODO: reemplazar por tu API real de envío si la tienes:
+        // bool ok = iridium_send_json(jsonPlain);
+        bool ok = iridium_send_json_stub(jsonPlain);
+        Serial.printf("[IR] send %s\n", ok ? "OK" : "FALLBACK");
+      } else {
+        Serial.println("[IR] no present; sólo BLE");
+      }
+    }
 
-  // a) plano
-  {
-    String pathPlain = "/plain"; // ajusta si usas otro endpoint
-    int code_plain = http.putJson(pathPlain.c_str(),
-                                  jsonPlain.c_str(),
-                                  netcfg::AUTH_BEARER);
-    Serial.printf("[HTTP] PUT %s -> %d\n", pathPlain.c_str(), code_plain);
+    // 6) Consumir tipo de reporte one-shot
+    g_next_report_type = 1;
   }
-  // b) cifrado (enviamos {"gcm_b64":"..."} )
-  {
-    String pathGcm = "/gcm"; // ajusta si usas otro endpoint
-    String body = String("{\"gcm_b64\":\"") + gcmB64 + "\"}";
-    int code_gcm = http.putJson(pathGcm.c_str(),
-                                body.c_str(),
-                                netcfg::AUTH_BEARER);
-    Serial.printf("[HTTP] PUT %s -> %d\n", pathGcm.c_str(), code_gcm);
-  }
 
-  // 6) Iridium -> por ahora PLANO
-  Serial.printf("[IR] (plain queued) %s\n", jsonPlain.c_str());
-
-  // 7) Consumir tipo de reporte one-shot
-  g_next_report_type = 1;
-}
-
-
-  // ----------------- UI (1 Hz) + BLE report de UI -----------------
+  // ----------------- UI (1 Hz) -----------------
   static uint32_t t_ui = 0;
   if (millis() - t_ui >= 1000){
     t_ui = millis();
@@ -509,7 +577,7 @@ if (millis() - t_uplink >= UPLINK_PERIOD_MS) {
     GpsFix fx = gps_last_fix();
     IridiumInfo ir = iridium_status();
 
-    // ------- UI data (sin AT: caches) -------
+    // ------- UI data (desde caches + GNSS/IR) -------
     OwlUiData ui;
     ui.csq = g_csq_cache;
     ui.iridiumLvl = (ir.sig >= 0) ? ir.sig : -1;
@@ -590,11 +658,13 @@ if (millis() - t_uplink >= UPLINK_PERIOD_MS) {
           extern bool ble_is_connected();
           bool bleConn = ble_is_connected();
 
+          IridiumInfo ir2 = iridium_status();
+
           oled_draw_testing_adv(
             mode_name_from_comms(), g_net_registered, g_pdp_up,
             g_rat_label, g_csq_cache, rssiDbm, g_ip_cache.c_str(),
             g_gsm_imei.c_str(),
-            ir.present, ir.sig, ir.imei.c_str(), ir.waiting?1:0,
+            ir2.present, ir2.sig, ir2.imei.c_str(), ir2.waiting?1:0,
             bleConn, (uint32_t)ESP.getFreeHeap(),
             g_last_test, g_test_busy, g_test_page
           );

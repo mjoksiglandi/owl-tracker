@@ -116,3 +116,70 @@ String modem_rat_label(TinyGsm &m) {
   return "--";
 }
 
+bool modem_radio_tune(TinyGsm &m) {
+  // RAT AUTO (ya lo haces en tu bring-up)
+  (void)modem_set_auto(m); // ignora si falla
+
+  // Desactivar PSM y eDRX (algunas celdas los habilitan y “duermen” el módem)
+  // SIMCom acepta CPSMS=0 y CEDRXS=0
+  m.sendAT("+CPSMS=0"); m.waitResponse(3000);
+  m.sendAT("+CEDRXS=0"); m.waitResponse(3000);
+
+  // Asegurar operador automático (por si quedó forzado)
+  m.sendAT("+COPS=0"); m.waitResponse(10000);
+
+  return true;
+}
+
+bool modem_pdp_hard_reset(TinyGsm &m, const char* apn, const char* user, const char* pass) {
+  // 1) Desconecta GPRS si está arriba
+  m.gprsDisconnect();
+
+  // 2) Desatacha de PS y vuelve a atachar
+  m.sendAT("+CGATT=0"); m.waitResponse(5000);
+  delay(1000);
+  m.sendAT("+CGATT=1"); m.waitResponse(10000);
+
+  // 3) Reconfigura el contexto (CID=1) por si quedó “sucio”
+  //    NB: TinyGSM también lo hace, pero re-declararlo ayuda en SIMCom
+  m.sendAT("+CGDCONT=1,\"IP\",\"", apn, "\"");
+  m.waitResponse(3000);
+
+  // 4) Reconecta PDP
+  bool up = m.gprsConnect(apn, user, pass);
+  return up;
+}
+
+bool modem_radio_recover(TinyGsm &m, const char* apn, const char* user, const char* pass) {
+  // Secuencia más pesada si hay flapping
+  // a) Tune básico
+  modem_radio_tune(m);
+
+  // b) Ciclar CFUN si sigue mal (opcional, varias redes lo requieren)
+  m.sendAT("+CFUN=0"); m.waitResponse(10000);
+  delay(1500);
+  m.sendAT("+CFUN=1"); m.waitResponse(10000);
+
+  // c) Esperar registro con ventana realista (hasta 45–60 s)
+  if (!modem_wait_for_network(m, 45000)) {
+    Serial.println("[Owl] Recover: no network after CFUN cycle");
+    return false;
+  }
+
+  // d) Hard reset PDP
+  bool ok = modem_pdp_hard_reset(m, apn, user, pass);
+  Serial.printf("[Owl] Recover: PDP %s\n", ok ? "UP" : "DOWN");
+  return ok;
+}
+
+void modem_dump_regs(TinyGsm &m) {
+  // Estado de registro CS/PS para 2G/3G/LTE/NR
+  m.sendAT("+CREG?");  if (m.waitResponse(3000, "+CREG:")  == 1)  Serial.println(m.stream.readStringUntil('\n'));
+  m.sendAT("+CGREG?"); if (m.waitResponse(3000, "+CGREG:") == 1)  Serial.println(m.stream.readStringUntil('\n'));
+  m.sendAT("+CEREG?"); if (m.waitResponse(3000, "+CEREG:") == 1)  Serial.println(m.stream.readStringUntil('\n'));
+  // RAT/portadora
+  m.sendAT("+CPSI?");  if (m.waitResponse(3000, "+CPSI:")  == 1)  Serial.println(m.stream.readStringUntil('\n'));
+  // Operador y CSQ
+  Serial.printf("[Owl] Operador=%s\n", m.getOperator().c_str());
+  Serial.printf("[Owl] CSQ=%d\n", m.getSignalQuality());
+}

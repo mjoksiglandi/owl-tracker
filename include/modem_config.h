@@ -29,3 +29,15 @@ void modem_print_status(TinyGsm &m);
 
 // ===== NUEVO: obtener etiqueta "2G/3G/4G/5G" (parsea AT+CPSI?) =====
 String modem_rat_label(TinyGsm &m);
+
+// Desactiva PSM/eDRX y deja RAT en AUTO
+bool modem_radio_tune(TinyGsm &m);
+
+// Cierra PDP y vuelve a abrir APN de cero (hard reset del portador de datos)
+bool modem_pdp_hard_reset(TinyGsm &m, const char* apn, const char* user, const char* pass);
+
+// Secuencia de “recuperación completa” (detach/attach + CFUN cycling opcional)
+bool modem_radio_recover(TinyGsm &m, const char* apn, const char* user, const char* pass);
+
+// Dump concentrado de estado de registro + RAT (para diagnóstico)
+void modem_dump_regs(TinyGsm &m);

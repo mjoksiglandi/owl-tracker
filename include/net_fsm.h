@@ -46,15 +46,12 @@ struct NetFSM {
 
       case NetState::LTE_SET: {
         if (!lte_set_done) {
-          if (modem_set_lte(*modem)) {
-            lte_set_done = true;
-          } else {
-            modem_set_auto(*modem); // no bloquea; solo envía AT
-          }
-        }
-        st = NetState::REG_CHECK;
-        next_ms = now;
-      } break;
+         modem_set_auto(*modem);
+                lte_set_done = true;
+              }
+              st = NetState::REG_CHECK;
+              next_ms = now;
+            } break;
 
       case NetState::REG_CHECK: {
         // si ya está conectado a red y con IP => READY
