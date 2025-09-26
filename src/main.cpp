@@ -9,6 +9,7 @@
 #include <TinyGsmClient.h>
 #include "comms_mode.h"
 #include "settings.h"
+#include "inbox.h"
 
 // Núcleo
 #include "modem_config.h"
@@ -419,6 +420,7 @@ void setup(){
   LOGF("[BLE] %s", ble_ok ? "advertising" : "init fail");
 
   xTaskCreatePinnedToCore(net_task, "net_task", 4096, nullptr, 1, nullptr, 0);
+  inbox::begin(16);   // capacidad 16 mensajes
 }
 
 // ===================== LOOP =================================
@@ -625,9 +627,13 @@ void loop(){
           oled_draw_sys_config(ui, g_net_registered, g_pdp_up, ipStr, sd_ok, i2cOk, fwStr.c_str());
         } break;
 
-        case UiScreen::MESSAGES:
-          oled_draw_messages(ir.waiting ? 1 : 0, "");
-          break;
+         case UiScreen::MESSAGES: {
+            uint16_t unread = inbox::unread_count();
+            String   last   = inbox::last_body();
+            oled_draw_messages(unread, last);
+            // Si quieres marcar como leídos al entrar:
+            inbox::mark_all_read();
+          } break;
 
         case UiScreen::GSM_DETAIL: {
           auto csq_to_dbm = [](int csq)->int {

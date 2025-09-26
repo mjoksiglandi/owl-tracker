@@ -5,8 +5,8 @@
 #include <cstdio>    // std::snprintf
 
 // Ya no necesitamos cifrar para BLE, pero dejamos includes por si reutilizas en otro lado
-#include "crypto.h"    // owl_encrypt_aes256gcm_base64(.)
-#include "secrets.h"   // OWL_AES256_KEY[32], OWL_GCM_IV_LEN
+// #include "crypto.h"    // owl_encrypt_aes256gcm_base64(.)
+// #include "secrets.h"   // OWL_AES256_KEY[32], OWL_GCM_IV_LEN
 
 #include "ble.h"
 #include "report.h"    // OwlReport
@@ -43,7 +43,7 @@ bool ble_begin(const char* devName) {
   const char* name = (devName && *devName) ? devName : "OwlTracker";
 
   NimBLEDevice::init(name);
-  NimBLEDevice::setPower(ESP_PWR_LVL_P7);
+  NimBLEDevice::setPower(ESP_PWR_LVL_P4);
   NimBLEDevice::setSecurityAuth(false, false, false);
 
   g_server = NimBLEDevice::createServer();
@@ -86,11 +86,11 @@ void ble_set_info(const String& info) {
   if (g_connected) g_chInfo->notify(true);
 }
 
-void ble_set_name(const char* newName) {
-  if (!newName || !*newName) return;
-  NimBLEDevice::setDeviceName(newName);
-  if (g_adv) { g_adv->stop(); g_adv->start(); }
-}
+// void ble_set_name(const char* newName) {
+//   if (!newName || !*newName) return;
+//   NimBLEDevice::setDeviceName(newName);
+//   if (g_adv) { g_adv->stop(); g_adv->start(); }
+// }
 
 // ===== Compatibilidad con tu main =====
 void ble_poll() {}  // no-op
