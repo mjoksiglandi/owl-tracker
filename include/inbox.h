@@ -3,7 +3,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-// Bandeja de entrada simple (ring buffer) thread-safe
 namespace inbox {
 
 struct Msg {
@@ -13,9 +12,13 @@ struct Msg {
   bool     unread;      // flag de no leído
 };
 
+// Persistencia opcional (el dueño registra un callback)
+typedef void (*PersistCb)(const Msg&);
+
 // API
 void begin(uint8_t capacity = 16);          // crea ring buffer/mutex
 void clear();                                // borra todo
+void set_persist(PersistCb cb);              // registra callback de persistencia
 
 // Encolado (thread-safe). Devuelve true si se encoló.
 bool push(const char* source, const String& body);

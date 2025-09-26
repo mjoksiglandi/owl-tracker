@@ -7,6 +7,7 @@ static uint8_t            g_cap      = 0;
 static volatile uint16_t  g_count    = 0;    // elementos válidos en buffer
 static uint16_t           g_head     = 0;    // próxima posición de escritura
 static SemaphoreHandle_t  g_mtx      = nullptr;
+static PersistCb          g_persist  = nullptr;
 
 static inline void lock()   { if (g_mtx) xSemaphoreTake(g_mtx, portMAX_DELAY); }
 static inline void unlock() { if (g_mtx) xSemaphoreGive(g_mtx); }
@@ -28,6 +29,10 @@ void clear() {
   unlock();
 }
 
+void set_persist(PersistCb cb) {
+  g_persist = cb;
+}
+
 static inline uint16_t idx_last() {
   if (g_count == 0) return 0;
   return (uint16_t)((g_head + g_cap - 1) % g_cap);
@@ -35,26 +40,33 @@ static inline uint16_t idx_last() {
 
 bool push(const char* source, const String& body) {
   if (!g_buf || g_cap == 0) return false;
-  lock();
 
-  // escribir en head
+  // Escribe dentro del lock
+  Msg snapshot;
+  lock();
   uint16_t i = g_head;
+
   g_buf[i].ts_ms = millis();
   strncpy(g_buf[i].source, source ? source : "UNK", sizeof(g_buf[i].source) - 1);
   g_buf[i].source[sizeof(g_buf[i].source) - 1] = '\0';
   g_buf[i].body = body;
   g_buf[i].unread = true;
 
-  // avanzar head
+  // Copia snapshot para persistir fuera del lock
+  snapshot = g_buf[i];
+
+  // Avanza head
   g_head = (uint16_t)((g_head + 1) % g_cap);
   if (g_count < g_cap) {
     g_count++;
-  } else {
-    // sobrescritura: si llenamos, el más antiguo se pierde
-    // (nada adicional que hacer)
+  }
+  unlock();
+
+  // Llama persistencia (si hay callback), fuera del lock
+  if (g_persist) {
+    g_persist(snapshot);
   }
 
-  unlock();
   return true;
 }
 

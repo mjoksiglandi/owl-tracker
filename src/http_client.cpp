@@ -1,108 +1,95 @@
 #include "http_client.h"
-#include <cstring> // strlen
 
-// ==================== CTOR / BEGIN / GETTERS ====================
-OwlHttpClient::OwlHttpClient(TinyGsm& /*modem*/,
-                             TinyGsmClient& client,
-                             const String& host,
-                             uint16_t port)
-: _client(client), _host(host), _port(port)
-{}
-
-void OwlHttpClient::begin(TinyGsm& /*modem*/,
-                          const char* host,
-                          uint16_t port,
-                          const char* /*root_ca*/)
-{
-  _host = (host ? host : "");
-  _port = port;
+void OwlHttpClient::setSecure(bool en, const char* ca_pem) {
+  use_tls_ = en;
+  ca_pem_  = ca_pem;
+#ifdef TINY_GSM_USE_SSL
+  if (tls_) {
+    if (use_tls_) {
+      if (ca_pem_) {
+        tls_->setCACert(ca_pem_);   // validación completa
+      } else {
+        tls_->setInsecure();        // pruebas (sin validar CA)
+      }
+    }
+  }
+#endif
 }
 
-TinyGsmClient& OwlHttpClient::client()       { return _client; }
-const String&  OwlHttpClient::host() const   { return _host; }
-uint16_t       OwlHttpClient::port() const   { return _port; }
+bool OwlHttpClient::connect() {
+  if (!use_tls_) {
+    return tcp_.connect(host_, port_);
+  }
+#ifdef TINY_GSM_USE_SSL
+  if (tls_) {
+    return tls_->connect(host_, port_);
+  }
+#endif
+  return false;
+}
 
-// ==================== HELPERS INTERNOS ====================
-static int parse_status_line(Stream& s, uint32_t timeout_ms = 3000) {
+void OwlHttpClient::disconnect() {
+  if (!use_tls_) {
+    tcp_.stop();
+    return;
+  }
+#ifdef TINY_GSM_USE_SSL
+  if (tls_) tls_->stop();
+#endif
+}
+
+int OwlHttpClient::parseHttpStatus(Stream& s, uint32_t timeout_ms) {
   uint32_t t0 = millis();
-  while (!s.available() && (millis() - t0 < timeout_ms)) { delay(1); }
+  while (!s.available() && millis()-t0 < timeout_ms) { delay(10); }
   if (!s.available()) return -1;
 
-  // Primera línea: "HTTP/1.1 200 OK\r\n"
-  String line = s.readStringUntil('\n');
-  int sp1 = line.indexOf(' ');
+  String status = s.readStringUntil('\n'); // "HTTP/1.1 200 OK\r"
+  int sp1 = status.indexOf(' ');
   if (sp1 < 0) return -1;
-  int sp2 = line.indexOf(' ', sp1 + 1);
-  if (sp2 < 0) sp2 = line.length();
-  return line.substring(sp1 + 1, sp2).toInt();
+  int sp2 = status.indexOf(' ', sp1+1);
+  String codeStr = (sp2>sp1) ? status.substring(sp1+1, sp2) : status.substring(sp1+1);
+  codeStr.trim();
+  if (codeStr.length() < 3) return -1;
+  return codeStr.toInt();
 }
 
-static void flush_and_close(Client& c, uint32_t timeout_ms = 5000) {
-  uint32_t t0 = millis();
-  while ((c.connected() || c.available()) && (millis() - t0 < timeout_ms)) {
-    while (c.available()) c.read();
-    delay(1);
+int OwlHttpClient::postJson(const char* path, const char* json, const char* bearer) {
+  if (!connect()) return -1;
+
+  String req;
+  size_t bodyLen = json ? strlen(json) : 0;
+  req.reserve(256 + bodyLen);
+  req += "POST "; req += path; req += " HTTP/1.1\r\n";
+  req += "Host: "; req += host_; req += "\r\n";
+  req += "Connection: close\r\n";
+  req += "Content-Type: application/json\r\n";
+  if (bearer && *bearer) {
+    req += "Authorization: Bearer "; req += bearer; req += "\r\n";
   }
-  c.stop();
-}
+  req += "Content-Length: "; req += String(bodyLen); req += "\r\n\r\n";
 
-// ==================== PUT / POST JSON ====================
-int OwlHttpClient::putJson(const char* path,
-                           const char* jsonBody,
-                           const char* bearer)
-{
-  auto& cl = client();
-  if (!cl.connect(host().c_str(), port())) return -1;
-
-  cl.print("PUT ");
-  cl.print(path ? path : "/");
-  cl.print(" HTTP/1.1\r\nHost: ");
-  cl.print(host());
-  cl.print("\r\nConnection: close\r\nContent-Type: application/json\r\n");
-
-  if (bearer && bearer[0]) {
-    cl.print("Authorization: ");
-    cl.print(bearer);
-    cl.print("\r\n");
-  }
-
-  cl.print("Content-Length: ");
-  cl.print((int)strlen(jsonBody ? jsonBody : ""));
-  cl.print("\r\n\r\n");
-
-  if (jsonBody) cl.print(jsonBody);
-
-  int code = parse_status_line(cl);
-  flush_and_close(cl);
-  return code;
-}
-
-int OwlHttpClient::postJson(const char* path,
-                            const char* jsonBody,
-                            const char* bearer)
-{
-  auto& cl = client();
-  if (!cl.connect(host().c_str(), port())) return -1;
-
-  cl.print("POST ");
-  cl.print(path ? path : "/");
-  cl.print(" HTTP/1.1\r\nHost: ");
-  cl.print(host());
-  cl.print("\r\nConnection: close\r\nContent-Type: application/json\r\n");
-
-  if (bearer && bearer[0]) {
-    cl.print("Authorization: ");
-    cl.print(bearer);
-    cl.print("\r\n");
+  if (!use_tls_) {
+    tcp_.print(req);
+    if (json && bodyLen) tcp_.write((const uint8_t*)json, bodyLen);
+  } else {
+#ifdef TINY_GSM_USE_SSL
+    tls_->print(req);
+    if (json && bodyLen) tls_->write((const uint8_t*)json, bodyLen);
+#else
+    disconnect();
+    return -1;
+#endif
   }
 
-  cl.print("Content-Length: ");
-  cl.print((int)strlen(jsonBody ? jsonBody : ""));
-  cl.print("\r\n\r\n");
+  int code = -1;
+  if (!use_tls_) {
+    code = parseHttpStatus(tcp_);
+  } else {
+#ifdef TINY_GSM_USE_SSL
+    code = parseHttpStatus(*tls_);
+#endif
+  }
 
-  if (jsonBody) cl.print(jsonBody);
-
-  int code = parse_status_line(cl);
-  flush_and_close(cl);
+  disconnect();
   return code;
 }

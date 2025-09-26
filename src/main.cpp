@@ -3,13 +3,11 @@
 #include <stdarg.h>
 #include <Wire.h>
 #include <SPI.h>
-#include <FS.h>
-#include <SD.h>
 #include <WiFi.h>
 #include <TinyGsmClient.h>
+
+// Modo de comunicaciones (rotación con BTN4)
 #include "comms_mode.h"
-#include "settings.h"
-#include "inbox.h"
 
 // Núcleo
 #include "modem_config.h"
@@ -32,6 +30,14 @@
 #include "crypto.h"    // owl_encrypt_aes256gcm_base64(...)
 #include "secrets.h"   // OWL_AES256_KEY[32], OWL_GCM_IV_LEN
 
+// Inbox unificada
+#include "inbox.h"
+
+// SdFat (FAT32 + exFAT) sobre HSPI
+#include <SdFat.h>
+static SdFs      sd;
+static FsFile    sdFile;
+
 // FreeRTOS
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -42,8 +48,19 @@ HardwareSerial SerialAT(1);
 HardwareSerial SerialGPS(2);
 
 TinyGsm modem(SerialAT);
-TinyGsmClient gsmClient(modem);
-OwlHttpClient http(modem, gsmClient, netcfg::HOST, netcfg::PORT);
+TinyGsmClient        gsmClient(modem);
+#ifdef TINY_GSM_USE_SSL
+TinyGsmClientSecure  gsmClientSSL(modem);
+#endif
+
+OwlHttpClient http(
+  modem,
+  gsmClient,
+#ifdef TINY_GSM_USE_SSL
+  gsmClientSSL,
+#endif
+  netcfg::HOST, netcfg::PORT
+);
 
 SPIClass hspi(HSPI);
 
@@ -70,9 +87,9 @@ static char             g_rat_label[6] = "--";
 static String           g_ip_cache = "";
 
 // ======== Preferencia dinámica de portador ========
-static bool g_pref_iridium = false;           // true si no hay PDP sostenido
-static uint32_t g_no_pdp_since_ms = 0;        // cuándo empezó a faltar PDP
-static uint32_t g_pdp_ok_since_ms = 0;        // cuándo volvió PDP
+static bool g_pref_iridium = false;
+static uint32_t g_no_pdp_since_ms = 0;
+static uint32_t g_pdp_ok_since_ms = 0;
 
 // ======== Mutex TinyGSM ========
 static SemaphoreHandle_t g_modem_mtx = nullptr;
@@ -97,28 +114,60 @@ static inline void LOGF(const char *fmt, ...){
   Serial.println(buf);
 }
 
-// ===================== SD helpers (HSPI) =====================
+// ===================== SdFat helpers (HSPI + exFAT/FAT32) ====
 static bool sd_begin_hspi(){
   hspi.end();
   hspi.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
-  if (!SD.begin(PIN_SD_CS, hspi))   return false;
-  if (SD.cardType() == CARD_NONE)   return false;
-  File root = SD.open("/");
-  if (!root)                        return false;
-  root.close();
+
+  SdSpiConfig cfg(PIN_SD_CS, SHARED_SPI, SD_SCK_MHZ(20), &hspi);
+
+  if (!sd.begin(cfg)) {
+    Serial.println("[SD] init failed (no FAT/exFAT detectado)");
+    sd.initErrorHalt();
+    return false;
+  }
+
+  // Directorios
+  if (!sd.exists("/logs"))   { if (!sd.mkdir("/logs")) return false; }
+  if (!sd.exists("/inbox"))  { if (!sd.mkdir("/inbox")) return false; }
+
+  // Valida archivos (track + events + messages)
+  {
+    FsFile f = sd.open("/logs/track.csv",  O_WRITE | O_CREAT | O_APPEND);
+    if (!f) return false; f.close();
+  }
+  {
+    FsFile f = sd.open("/logs/events.csv", O_WRITE | O_CREAT | O_APPEND);
+    if (!f) return false; f.close();
+  }
+  {
+    FsFile f = sd.open("/inbox/messages.csv", O_WRITE | O_CREAT | O_APPEND);
+    if (!f) return false; f.close();
+  }
+
+  uint32_t volType = sd.fatType(); // 0=exFAT, 12/16/32
+  if (volType == 0)  Serial.println("[SD] exFAT OK");
+  else               Serial.printf("[SD] FAT%u OK\n", volType);
+
   return true;
 }
-static void sd_logln(const String &line){
-  if (!sd_ok) return;
-  File f = SD.open("/logs/track.csv", FILE_APPEND);
-  if (!f){
-    SD.mkdir("/logs");
-    f = SD.open("/logs/track.csv", FILE_APPEND);
-  }
-  if (f){
-    f.println(line);
-    f.close();
-  }
+static void sd_logln(const String& line){
+  if (!sd.card()) return;
+  FsFile f = sd.open("/logs/track.csv", O_WRITE | O_CREAT | O_APPEND);
+  if (!f) return; f.println(line); f.close();
+}
+static void sd_eventln(const String& line){
+  if (!sd.card()) return;
+  FsFile f = sd.open("/logs/events.csv", O_WRITE | O_CREAT | O_APPEND);
+  if (!f) return; f.println(line); f.close();
+}
+static void sd_inbox_persist(const inbox::Msg& m){
+  if (!sd.card()) return;
+  String body = m.body; body.replace("\"", "\"\"");
+  char head[48]; snprintf(head, sizeof(head), "%lu,%s,", (unsigned long)m.ts_ms, m.source);
+  FsFile f = sd.open("/inbox/messages.csv", O_WRITE | O_CREAT | O_APPEND);
+  if (!f) return;
+  f.print(head); f.print("\""); f.print(body); f.println("\""); f.close();
 }
 
 // ===================== I2C seguro ============================
@@ -132,10 +181,21 @@ static bool i2c_probe(uint8_t addr){
 }
 
 // ===== Iridium enqueue (stub opcional) =====
-// Si ya tienes una API real para enviar por Iridium, reemplaza esta función por tu llamada.
 static bool iridium_send_json_stub(const String& s) {
   Serial.printf("[IR] (send-json) %s\n", s.c_str());
-  return false; // Devuelve true si tu envío real lo encola/acepta
+  return false;
+}
+
+// ============== Telegram relay por HTTPS (backend) ==============
+static bool telegram_send_text(const String& text) {
+  if (!g_net_registered) { Serial.println("[TG] sin red"); return false; }
+  if (!g_pdp_up)         { Serial.println("[TG] sin PDP"); return false; }
+  String body = String("{\"telegram\":\"") + text + "\"}";
+  if (!modem_lock(200)) { Serial.println("[TG] modem busy"); return false; }
+  int code = http.postJson(netcfg::PATH_PLAIN /*o PATH_TG*/, body.c_str(), netcfg::AUTH_BEARER);
+  modem_unlock();
+  Serial.printf("[TG] relay HTTPS %s -> %d\n", netcfg::PATH_PLAIN, code);
+  return (code == 200 || code == 201 || code == 202);
 }
 
 // ===================== Red (tarea) ===========================
@@ -169,14 +229,12 @@ static void net_task(void *arg){
           st = NState::ST_SLEEP;
           break;
         }
-        // RAT auto + tuning (PSM/eDRX OFF, COPS=0)
-        modem_set_auto(modem);       // ya no forzamos LTE-only
-        modem_radio_tune(modem);
+        modem_set_auto(modem);       // auto 2G/3G/4G
+        modem_radio_tune(modem);     // sin PSM/eDRX durante pruebas
         st = NState::ST_REG_WAIT;
       } break;
 
       case NState::ST_REG_WAIT: {
-        // Ventana realista (hasta ~45 s)
         bool reg = modem_wait_for_network(modem, 45000);
         g_net_registered = reg;
         if (!reg){
@@ -194,21 +252,17 @@ static void net_task(void *arg){
 
         g_pdp_up = up;
         LOGF("[NET] PDP %s", up ? "UP" : "DOWN");
+        modem_print_status(modem);
+        modem_dump_regs(modem);
+
         if (up) {
-          modem_print_status(modem);
-          modem_dump_regs(modem); // diagnóstico adicional
-          // Reset timers de preferencia
-          g_no_pdp_since_ms = 0;
-          g_pdp_ok_since_ms = millis();
-          g_pref_iridium = false;
-          st = NState::ST_RUN;
+          g_no_pdp_since_ms = 0; g_pdp_ok_since_ms = millis(); g_pref_iridium = false;
+          // Activa HTTPS (insecure para pruebas; usa CA en prod)
+          http.setSecure(true, nullptr);
         } else {
-          // No hay PDP: entra a RUN igualmente (no reiniciamos), preferencia a Iridium tras 30s
-          g_no_pdp_since_ms = millis();
-          g_pdp_ok_since_ms = 0;
-          g_pref_iridium = true;
-          st = NState::ST_RUN;
+          g_no_pdp_since_ms = millis(); g_pdp_ok_since_ms = 0; g_pref_iridium = true;
         }
+        st = NState::ST_RUN;
       } break;
 
       case NState::ST_RUN: {
@@ -223,29 +277,21 @@ static void net_task(void *arg){
         #endif
         g_pdp_up = pdp;
 
-        // Gestionar timers de preferencia sin reiniciar el módem
         uint32_t now = millis();
         if (pdp) {
           if (g_pdp_ok_since_ms == 0) g_pdp_ok_since_ms = now;
-          // si PDP estable ≥10 s, quitamos preferencia Iridium
           if (g_pdp_ok_since_ms && (now - g_pdp_ok_since_ms) >= 10000) {
-            if (g_pref_iridium) {
-              g_pref_iridium = false;
-              Serial.println("[NET] PDP estable: prioridad normal (GSM/LTE primero)");
-            }
+            if (g_pref_iridium) { g_pref_iridium = false; Serial.println("[NET] PDP estable: prioridad GSM/LTE"); }
           }
           g_no_pdp_since_ms = 0;
         } else {
           if (g_no_pdp_since_ms == 0) g_no_pdp_since_ms = now;
-          // si falta PDP ≥30 s, preferir Iridium
           if (!g_pref_iridium && (now - g_no_pdp_since_ms) >= 30000) {
-            g_pref_iridium = true;
-            Serial.println("[NET] Sin PDP sostenido: prioridad IRIDIUM");
+            g_pref_iridium = true; Serial.println("[NET] Sin PDP sostenido: prioridad IRIDIUM");
           }
           g_pdp_ok_since_ms = 0;
         }
 
-        // Refrescos UI protegidos
         if (modem_lock(500)){
           int csq = modem.getSignalQuality();
           g_csq_cache = (csq < 0 ? 99 : csq);
@@ -266,8 +312,6 @@ static void net_task(void *arg){
           }
           modem_unlock();
         }
-
-        // Importante: NO hacemos hard reset ni recover aquí; el equipo permanece en RUN.
       } break;
 
       case NState::ST_SLEEP: {
@@ -285,23 +329,48 @@ static void save_poi(){
   GpsFix fx = gps_last_fix();
   if (!fx.valid){
     LOG("[Owl] POI cancelado: sin fix");
-    return;
+  } else {
+    String utc = fx.utc.length() ? (fx.utc + "Z") : String("");
+    String s = String("POI,") + utc + "," +
+               String(fx.lat, 6) + "," +
+               String(fx.lon, 6) + "," +
+               String(fx.alt, 1);
+    LOG(("[Owl][EVENT] " + s).c_str());
+    sd_eventln(s);
+
+    String msg = "[POI] lat=" + String(fx.lat,6) + " lon=" + String(fx.lon,6)
+               + " alt=" + String(fx.alt,1) + " UTC=" + utc;
+    telegram_send_text(msg);
   }
-  String s = "POI," + fx.utc + "," + String(fx.lat, 6) + "," + String(fx.lon, 6) + "," + String(fx.alt, 1);
-  LOG(("[Owl] " + s).c_str());
-  sd_logln(s);
-  g_next_report_type = 4; // POI
+  g_next_report_type = 4; // one-shot
 }
 static void sos_trigger(){
   LOG("[Owl] SOS TRIGGERED!");
-  sd_logln(String("SOS,") + String(millis()));
-  g_next_report_type = 2; // Emergencia
+  GpsFix fx = gps_last_fix();
+  String utc = fx.utc.length() ? (fx.utc + "Z") : String("");
+  String s;
+  if (fx.valid) {
+    s = String("SOS,") + utc + "," +
+        String(fx.lat, 6) + "," +
+        String(fx.lon, 6) + "," +
+        String(fx.alt, 1);
+  } else {
+    s = String("SOS,") + utc;
+  }
+  sd_eventln(s);
+  LOGF("[Owl][EVENT] %s", s.c_str());
+
+  String msg = String("[SOS] ") + (g_gsm_imei.length()? g_gsm_imei.c_str() : "IMEI?")
+             + " UTC=" + utc
+             + (fx.valid ? (" lat=" + String(fx.lat,6) + " lon=" + String(fx.lon,6)) : "");
+  telegram_send_text(msg);
+
+  g_next_report_type = 2; // one-shot
 }
 
 // ===================== Pantallas =============================
 static UiScreen g_screen = UiScreen::HOME;
 
-// Carrusel SIN TESTING (para no activarlo por error)
 static UiScreen next_screen_normal(UiScreen cur){
   static const UiScreen order[] = {
     UiScreen::HOME,
@@ -318,7 +387,6 @@ static UiScreen next_screen_normal(UiScreen cur){
   return order[(idx+1)%n];
 }
 
-// Adaptador: CommsMode -> nombre corto
 static const char* mode_name_from_comms(){
   const char* n = comms_mode_name(comms_mode_get());
   return n ? n : "AUTO";
@@ -352,7 +420,6 @@ static String make_json_from_report(const OwlReport& rpt) {
 static String make_gcm_b64_from_json(const String& jsonPlain) {
   uint8_t iv[OWL_GCM_IV_LEN];
   for (size_t i = 0; i < OWL_GCM_IV_LEN; ++i) iv[i] = (uint8_t)(esp_random() & 0xFF);
-
   String b64 = owl_encrypt_aes256gcm_base64(
     OWL_AES256_KEY,
     (const uint8_t*)jsonPlain.c_str(), jsonPlain.length(),
@@ -378,13 +445,8 @@ void setup(){
   // HOME “en vacío”
   {
     OwlUiData bootUi;
-    bootUi.csq = 99;
-    bootUi.iridiumLvl = -1;
-    bootUi.sats = -1;
-    bootUi.pdop = -1;
-    bootUi.lat = bootUi.lon = bootUi.alt = NAN;
-    bootUi.utc = "";
-    bootUi.msgRx = 0;
+    bootUi.csq = 99; bootUi.iridiumLvl = -1; bootUi.sats = -1; bootUi.pdop = -1;
+    bootUi.lat = bootUi.lon = bootUi.alt = NAN; bootUi.utc = ""; bootUi.msgRx = 0;
     oled_draw_dashboard(bootUi, "--");
   }
 
@@ -413,100 +475,72 @@ void setup(){
     LOG("[IR] sin ACK en 0x63; se omite init");
   }
 
+  // SD (exFAT/FAT32 vía SdFat)
   sd_ok = sd_begin_hspi();
   LOGF("[Owl] SD %s", sd_ok ? "OK" : "NO");
 
   ble_ok = ble_begin("OwlTracker");
   LOGF("[BLE] %s", ble_ok ? "advertising" : "init fail");
 
+  // Inbox unificada + persistencia en SD
+  inbox::begin(16);
+  inbox::set_persist(sd_inbox_persist);
+
   xTaskCreatePinnedToCore(net_task, "net_task", 4096, nullptr, 1, nullptr, 0);
-  inbox::begin(16);   // capacidad 16 mensajes
 }
 
 // ===================== LOOP =================================
 void loop(){
-  // ---------- BOTONES: prioridad máxima (cada ~2 ms) ----------
+  // ---------- BOTONES ----------
   static uint32_t t_btn = 0;
   if (millis() - t_btn >= 2){
     t_btn = millis();
     buttons_poll();
 
-    // BTN1: short = HOME, long/repeat = ciclo info normal / pág testing
     if (auto e = btn1_get(); true){
-      if (e.shortPress){
-        g_screen = UiScreen::HOME;
-      }
+      if (e.shortPress) g_screen = UiScreen::HOME;
       if (e.longPress || e.repeat){
-        if (g_screen == UiScreen::TESTING) {
-          g_test_page = (uint8_t)((g_test_page + 1) % 2);
-        } else {
-          g_screen = next_screen_normal(g_screen);
-        }
+        if (g_screen == UiScreen::TESTING) g_test_page = (uint8_t)((g_test_page + 1) % 2);
+        else g_screen = next_screen_normal(g_screen);
       }
     }
-
-    // BTN2: short = MESSAGES, long = POI
     if (auto e2 = btn2_get(); true){
-      if (e2.shortPress){
-        if (g_screen != UiScreen::TESTING) {
-          g_screen = UiScreen::MESSAGES;
-        }
-      }
-      if (e2.longPress){
-        if (g_screen != UiScreen::TESTING) {
-          save_poi();
-        }
-      }
+      if (e2.shortPress && g_screen != UiScreen::TESTING) g_screen = UiScreen::MESSAGES;
+      if (e2.longPress  && g_screen != UiScreen::TESTING) save_poi();
     }
-
-    // BTN3: long = SOS
-    if (auto e3 = btn3_get(); e3.longPress){
-      if (g_screen != UiScreen::TESTING) {
-        sos_trigger();
-      }
-    }
-
-    // BTN4: short = rota modo, long = entrar/salir TESTING
+    if (auto e3 = btn3_get(); e3.longPress && g_screen != UiScreen::TESTING) sos_trigger();
     if (auto e4 = btn4_get(); true){
-      if (e4.shortPress){
-        if (g_screen != UiScreen::TESTING){
-          auto m = comms_mode_get();
-          m = comms_mode_next(m);
-          comms_mode_set(m);
-          const char* name = comms_mode_name(m);
-          snprintf(g_last_test, sizeof(g_last_test), "Mode -> %s", name ? name : "AUTO");
-        }
+      if (e4.shortPress && g_screen != UiScreen::TESTING){
+        auto m = comms_mode_get();
+        m = comms_mode_next(m);
+        comms_mode_set(m);
+        const char* name = comms_mode_name(m);
+        snprintf(g_last_test, sizeof(g_last_test), "Mode -> %s", name ? name : "AUTO");
       }
       if (e4.longPress){
-        if (g_screen == UiScreen::TESTING){
-          g_screen = UiScreen::HOME;      // salir
-        } else {
-          g_test_page = 0;                 // entrar a testing (página 1)
-          g_screen = UiScreen::TESTING;
-        }
+        if (g_screen == UiScreen::TESTING) g_screen = UiScreen::HOME;
+        else { g_test_page = 0; g_screen = UiScreen::TESTING; }
       }
     }
   }
 
-  // Sensores no bloqueantes
+  // Sensores / servicios
   gps_poll(SerialGPS);
   if (g_mag_ok) mag_poll();
   iridium_poll();
   ble_poll();
 
-  // ----------------- UPLINK (cada 5 s) -----------------
+  // ----------------- UPLINK (cada 10 s) -----------------
   static uint32_t t_uplink = 0;
-  const uint32_t UPLINK_PERIOD_MS = netcfg::UPLINK_PERIOD_MS;
+  const uint32_t UPLINK_PERIOD_MS = netcfg::UPLINK_PERIOD_MS;  // 10 s
   if (millis() - t_uplink >= UPLINK_PERIOD_MS) {
     t_uplink = millis();
 
-    // 1) Captura último fix y estatus Iridium
     GpsFix fx = gps_last_fix();
     IridiumInfo ir = iridium_status();
 
-    // 2) Arma OwlReport base
     OwlReport rpt;
-    rpt.tipoReporte = g_next_report_type; // 1 normal salvo eventos
+    rpt.tipoReporte = g_next_report_type;
     if (g_gsm_imei.length())      rpt.IMEI = g_gsm_imei;
     else if (ir.imei.length())    rpt.IMEI = ir.imei;
     else                          rpt.IMEI = "";
@@ -518,48 +552,34 @@ void loop(){
     rpt.velocidad = fx.speed_mps;
     rpt.fechaHora = fx.utc.length() ? (fx.utc + "Z") : String("");
 
-    // 3) JSON plano
     String jsonPlain = make_json_from_report(rpt);
 
-    // 4) BLE -> publicar EN CLARO (sin cifrar)
+    // BLE claro
     ble_update(jsonPlain);
 
-    // 5) Envío por portador según disponibilidad/prioridad
+    // HTTP o Iridium según prioridad
     if (!g_pref_iridium && g_net_registered && g_pdp_up) {
-      // GSM/LTE primero
       String gcmB64 = make_gcm_b64_from_json(jsonPlain);
-      // a) plano
-      {
-       String pathPlain = netcfg::PATH_PLAIN;
-        if (modem_lock(200)) {
-          int code_plain = http.postJson(pathPlain.c_str(),
-                                         jsonPlain.c_str(),
-                                         netcfg::AUTH_BEARER);
-          modem_unlock();
-          Serial.printf("[HTTP] POST %s -> %d\n", pathPlain.c_str(), code_plain);
-        } else {
-          Serial.println("[HTTP] skip (modem busy)");
-        }
+
+      if (modem_lock(200)) {
+        int code_plain = http.postJson(netcfg::PATH_PLAIN, jsonPlain.c_str(), netcfg::AUTH_BEARER);
+        modem_unlock();
+        Serial.printf("[HTTP] POST %s -> %d\n", netcfg::PATH_PLAIN, code_plain);
+      } else {
+        Serial.println("[HTTP] skip (modem busy)");
       }
-      // b) cifrado
-      {
-        String pathGcm   = netcfg::PATH_GCM;
-        String body = String("{\"gcm_b64\":\"") + gcmB64 + "\"}";
-        if (modem_lock(200)) {
-          int code_gcm = http.postJson(pathGcm.c_str(),
-                                       body.c_str(),
-                                       netcfg::AUTH_BEARER);
-          modem_unlock();
-          Serial.printf("[HTTP] POST %s -> %d\n", pathGcm.c_str(), code_gcm);
-        } else {
-          Serial.println("[HTTP] skip (modem busy gcm)");
-        }
+
+      String body = String("{\"gcm_b64\":\"") + gcmB64 + "\"}";
+      if (modem_lock(200)) {
+        int code_gcm = http.postJson(netcfg::PATH_GCM, body.c_str(), netcfg::AUTH_BEARER);
+        modem_unlock();
+        Serial.printf("[HTTP] POST %s -> %d\n", netcfg::PATH_GCM, code_gcm);
+      } else {
+        Serial.println("[HTTP] skip (modem busy gcm)");
       }
+
     } else {
-      // Prioridad Iridium (sin PDP o forzada)
       if (ir.present) {
-        // TODO: reemplazar por tu API real de envío si la tienes:
-        // bool ok = iridium_send_json(jsonPlain);
         bool ok = iridium_send_json_stub(jsonPlain);
         Serial.printf("[IR] send %s\n", ok ? "OK" : "FALLBACK");
       } else {
@@ -567,7 +587,6 @@ void loop(){
       }
     }
 
-    // 6) Consumir tipo de reporte one-shot
     g_next_report_type = 1;
   }
 
@@ -579,7 +598,6 @@ void loop(){
     GpsFix fx = gps_last_fix();
     IridiumInfo ir = iridium_status();
 
-    // ------- UI data (desde caches + GNSS/IR) -------
     OwlUiData ui;
     ui.csq = g_csq_cache;
     ui.iridiumLvl = (ir.sig >= 0) ? ir.sig : -1;
@@ -591,10 +609,9 @@ void loop(){
     ui.speed_mps = fx.speed_mps;
     ui.course_deg = fx.course_deg;
     ui.pressure_hpa = NAN;
-    ui.msgRx = ir.waiting ? 1 : 0;
+    ui.msgRx = inbox::unread_count();
     ui.utc = fx.utc.length() ? (fx.utc + "Z") : String("");
 
-    // ------- Render OLED si cambió -------
     static UiScreen lastScreen = UiScreen::HOME;
     static OwlUiData last = {};
     auto neq = [](double x, double y, double eps){ return !(fabs(x - y) <= eps); };
@@ -611,30 +628,24 @@ void loop(){
         case UiScreen::HOME:
           oled_draw_dashboard(ui, g_rat_label);
           break;
-
         case UiScreen::GPS_DETAIL:
           oled_draw_gps_detail(ui);
           break;
-
         case UiScreen::IRIDIUM_DETAIL:
           oled_draw_iridium_detail(ir.present, ir.sig, ir.waiting ? 1 : 0, ir.imei);
           break;
-
         case UiScreen::SYS_CONFIG: {
           const String ipStr = g_ip_cache;
           const bool i2cOk = (g_mag_ok || ir.present);
           String fwStr = String("fw 1.0.0 ") + (ble_ok ? "BLE:OK" : "BLE:NO");
           oled_draw_sys_config(ui, g_net_registered, g_pdp_up, ipStr, sd_ok, i2cOk, fwStr.c_str());
         } break;
-
-         case UiScreen::MESSAGES: {
-            uint16_t unread = inbox::unread_count();
-            String   last   = inbox::last_body();
-            oled_draw_messages(unread, last);
-            // Si quieres marcar como leídos al entrar:
-            inbox::mark_all_read();
-          } break;
-
+        case UiScreen::MESSAGES: {
+          uint16_t unread = inbox::unread_count();
+          String   lastMsg = inbox::last_body();
+          oled_draw_messages(unread, lastMsg);
+          inbox::mark_all_read();
+        } break;
         case UiScreen::GSM_DETAIL: {
           auto csq_to_dbm = [](int csq)->int {
             if (csq <= 0)  return -113;
@@ -645,13 +656,11 @@ void loop(){
           int rssiDbm = csq_to_dbm(ui.csq);
           oled_draw_gsm_detail(ui, g_gsm_imei, g_net_registered, g_pdp_up, rssiDbm);
         } break;
-
         case UiScreen::BLE_DETAIL: {
           extern bool ble_is_connected();
           bool bleConn = ble_is_connected();
           oled_draw_ble_detail(bleConn, String("OwlTracker"));
         } break;
-
         case UiScreen::TESTING: {
           auto csq_to_dbm = [](int csq)->int {
             if (csq <= 0)  return -113;
@@ -660,10 +669,8 @@ void loop(){
             return -113 + 2 * csq;
           };
           int rssiDbm = csq_to_dbm(g_csq_cache);
-
           extern bool ble_is_connected();
           bool bleConn = ble_is_connected();
-
           IridiumInfo ir2 = iridium_status();
 
           oled_draw_testing_adv(
@@ -681,7 +688,7 @@ void loop(){
     }
   }
 
-  // ----------------- Log SD (30 s) -----------------
+  // -------- Log SD (30 s) --------
   static uint32_t t_log = 0;
   if (sd_ok && millis() - t_log > 30000){
     t_log = millis();

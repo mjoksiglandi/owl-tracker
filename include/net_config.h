@@ -4,7 +4,7 @@
 namespace netcfg {
 
 // ≡ Datos de red (ajusta a tu operador/backend)
-inline const char* APN       = "internet.wom.cl";
+inline const char* APN       = "bam.entelpcs.cl"; //internet.wom.cl
 inline const char* APN_USER  = "";
 inline const char* APN_PASS  = "";
 

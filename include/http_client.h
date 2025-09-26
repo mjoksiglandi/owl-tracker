@@ -4,21 +4,52 @@
 
 class OwlHttpClient {
 public:
-  OwlHttpClient(TinyGsm& modem, TinyGsmClient& client, const String& host, uint16_t port);
-  void begin(TinyGsm& modem, const char* host, uint16_t port, const char* root_ca);
+  OwlHttpClient(TinyGsm& modem,
+                TinyGsmClient& tcpClient,
+#ifdef TINY_GSM_USE_SSL
+                TinyGsmClientSecure& tlsClient,
+#endif
+                const char* host, uint16_t port)
+  : modem_(modem),
+    tcp_(tcpClient),
+#ifdef TINY_GSM_USE_SSL
+    tls_(&tlsClient),
+#else
+    tls_(nullptr),
+#endif
+    host_(host),
+    port_(port),
+    use_tls_(false),
+    ca_pem_(nullptr)
+  {}
 
-  // Getters seguros (evitan choques con macros)
-  TinyGsmClient& client();
-  const String&  host() const;
-  uint16_t       port() const;
+  // Cambiar endpoint en runtime (opcional)
+  void setEndpoint(const char* host, uint16_t port) {
+    host_ = host; port_ = port;
+  }
 
-  // HTTP raw (sobre TinyGsmClient)
-  int putJson (const char* path, const char* jsonBody, const char* bearer = nullptr);
-  int postJson(const char* path, const char* jsonBody, const char* bearer = nullptr);
+  // Activa HTTPS. Si ca_pem = nullptr, va "insecure" (para pruebas)
+  void setSecure(bool en, const char* ca_pem=nullptr);
+
+  // POST application/json (Bearer opcional)
+  // Devuelve código HTTP (200..599) o -1 si falla transporte/parsing.
+  int postJson(const char* path, const char* json, const char* bearer = nullptr);
 
 private:
-  // ⚠️ Renombrado para evitar colisiones con posibles macros
-  TinyGsmClient& _client;  // referencia, no copiable
-  String         _host;
-  uint16_t       _port = 80;
+  int  parseHttpStatus(Stream& s, uint32_t timeout_ms=5000);
+  bool connect();
+  void disconnect();
+
+private:
+  TinyGsm&        modem_;
+  TinyGsmClient&  tcp_;
+#ifdef TINY_GSM_USE_SSL
+  TinyGsmClientSecure* tls_;
+#else
+  void*           tls_; // dummy
+#endif
+  const char*     host_;
+  uint16_t        port_;
+  bool            use_tls_;
+  const char*     ca_pem_;
 };
