@@ -1,41 +1,28 @@
 #include "http_client.h"
 
 void OwlHttpClient::setSecure(bool en, const char* ca_pem) {
-  use_tls_ = en;
+  // Activamos TLS sólo si tenemos cliente TLS
+  use_tls_ = (en && tls_ != nullptr);
   ca_pem_  = ca_pem;
-#ifdef TINY_GSM_USE_SSL
-  if (tls_) {
-    if (use_tls_) {
-      if (ca_pem_) {
-        tls_->setCACert(ca_pem_);   // validación completa
-      } else {
-        tls_->setInsecure();        // pruebas (sin validar CA)
-      }
-    }
-  }
-#endif
+
+  // Nota: algunos clientes TLS (p.ej. TinyGsmClientSecure) exponen setCACert/setInsecure,
+  // pero aquí no hacemos cast directo al tipo concreto para evitar dependencias.
+  // Si necesitas establecer la CA explícitamente, hazlo donde construyes el cliente TLS.
 }
 
 bool OwlHttpClient::connect() {
-  if (!use_tls_) {
-    return tcp_.connect(host_, port_);
-  }
-#ifdef TINY_GSM_USE_SSL
-  if (tls_) {
+  if (use_tls_) {
     return tls_->connect(host_, port_);
   }
-#endif
-  return false;
+  return tcp_->connect(host_, port_);
 }
 
 void OwlHttpClient::disconnect() {
-  if (!use_tls_) {
-    tcp_.stop();
-    return;
+  if (use_tls_) {
+    tls_->stop();
+  } else {
+    tcp_->stop();
   }
-#ifdef TINY_GSM_USE_SSL
-  if (tls_) tls_->stop();
-#endif
 }
 
 int OwlHttpClient::parseHttpStatus(Stream& s, uint32_t timeout_ms) {
@@ -56,8 +43,9 @@ int OwlHttpClient::parseHttpStatus(Stream& s, uint32_t timeout_ms) {
 int OwlHttpClient::postJson(const char* path, const char* json, const char* bearer) {
   if (!connect()) return -1;
 
-  String req;
   size_t bodyLen = json ? strlen(json) : 0;
+
+  String req;
   req.reserve(256 + bodyLen);
   req += "POST "; req += path; req += " HTTP/1.1\r\n";
   req += "Host: "; req += host_; req += "\r\n";
@@ -68,27 +56,11 @@ int OwlHttpClient::postJson(const char* path, const char* json, const char* bear
   }
   req += "Content-Length: "; req += String(bodyLen); req += "\r\n\r\n";
 
-  if (!use_tls_) {
-    tcp_.print(req);
-    if (json && bodyLen) tcp_.write((const uint8_t*)json, bodyLen);
-  } else {
-#ifdef TINY_GSM_USE_SSL
-    tls_->print(req);
-    if (json && bodyLen) tls_->write((const uint8_t*)json, bodyLen);
-#else
-    disconnect();
-    return -1;
-#endif
-  }
+  Client& c = use_tls_ ? *tls_ : *tcp_;
+  c.print(req);
+  if (json && bodyLen) c.write((const uint8_t*)json, bodyLen);
 
-  int code = -1;
-  if (!use_tls_) {
-    code = parseHttpStatus(tcp_);
-  } else {
-#ifdef TINY_GSM_USE_SSL
-    code = parseHttpStatus(*tls_);
-#endif
-  }
+  int code = parseHttpStatus(c);
 
   disconnect();
   return code;

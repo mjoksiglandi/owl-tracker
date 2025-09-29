@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include "modem_compat.h"
 
 // Políticas de comunicación para TESTING
 enum class CommsMode : uint8_t {

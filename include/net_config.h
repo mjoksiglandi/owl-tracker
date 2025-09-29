@@ -8,8 +8,8 @@ inline const char* APN       = "bam.entelpcs.cl"; //internet.wom.cl
 inline const char* APN_USER  = "";
 inline const char* APN_PASS  = "";
 
-inline const char* HOST      = "example.com";
-inline const uint16_t PORT   = 80;
+inline const char* HOST      = "guardian.dts.cl";
+inline const uint16_t PORT   = 443;
 // Endpoints opcionales (si usas distintos para claro/cifrado)
 inline const char* PATH_PLAIN = "/plain";
 inline const char* PATH_GCM   = "/gcm";

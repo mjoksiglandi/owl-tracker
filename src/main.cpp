@@ -4,10 +4,12 @@
 #include <Wire.h>
 #include <SPI.h>
 #include <WiFi.h>
+#include <Client.h>
 #include <TinyGsmClient.h>
 
 // Modo de comunicaciones (rotación con BTN4)
 #include "comms_mode.h"
+#include "modem_compat.h"
 
 // Núcleo
 #include "modem_config.h"
@@ -28,7 +30,7 @@
 
 // Cifrado (para HTTP)
 #include "crypto.h"    // owl_encrypt_aes256gcm_base64(...)
-#include "secrets.h"   // OWL_AES256_KEY[32], OWL_GCM_IV_LEN
+#include "secrets.h"   // OWL_AES256_KEY[32], OWL_GCM_IV_LEN, TG_BOT_TOKEN, TG_CHAT_ID
 
 // Inbox unificada
 #include "inbox.h"
@@ -43,24 +45,18 @@ static FsFile    sdFile;
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
+// Telegram (DIRECTO por HTTPS con SSLClient en telegram_direct.cpp)
+#include "telegram_direct.h"
+
 // UARTs
 HardwareSerial SerialAT(1);
 HardwareSerial SerialGPS(2);
 
 TinyGsm modem(SerialAT);
-TinyGsmClient        gsmClient(modem);
-#ifdef TINY_GSM_USE_SSL
-TinyGsmClientSecure  gsmClientSSL(modem);
-#endif
+TinyGsmClient gsmClient(modem);
 
-OwlHttpClient http(
-  modem,
-  gsmClient,
-#ifdef TINY_GSM_USE_SSL
-  gsmClientSSL,
-#endif
-  netcfg::HOST, netcfg::PORT
-);
+// SIN TLS para HTTP (dejamos nullptr)
+OwlHttpClient http(modem, gsmClient, nullptr, netcfg::HOST, netcfg::PORT);
 
 SPIClass hspi(HSPI);
 
@@ -69,8 +65,8 @@ static bool sd_ok = false;
 static bool g_mag_ok = false;
 static bool ble_ok = false;
 
-static volatile bool g_net_registered = false;
-static volatile bool g_pdp_up = false;
+volatile bool g_net_registered = false;
+volatile bool g_pdp_up = false;
 
 // IMEI GSM (cache) y tipo de reporte “one-shot”
 static String g_gsm_imei = "";
@@ -92,7 +88,7 @@ static uint32_t g_no_pdp_since_ms = 0;
 static uint32_t g_pdp_ok_since_ms = 0;
 
 // ======== Mutex TinyGSM ========
-static SemaphoreHandle_t g_modem_mtx = nullptr;
+SemaphoreHandle_t g_modem_mtx = nullptr;
 static inline bool modem_lock(uint32_t ms=15000){
   if (!g_modem_mtx) return false;
   return xSemaphoreTake(g_modem_mtx, pdMS_TO_TICKS(ms)) == pdTRUE;
@@ -123,7 +119,7 @@ static bool sd_begin_hspi(){
 
   if (!sd.begin(cfg)) {
     Serial.println("[SD] init failed (no FAT/exFAT detectado)");
-    sd.initErrorHalt();
+    // sd.initErrorHalt();  // evitar halt duro
     return false;
   }
 
@@ -186,16 +182,9 @@ static bool iridium_send_json_stub(const String& s) {
   return false;
 }
 
-// ============== Telegram relay por HTTPS (backend) ==============
+// ============== Telegram DIRECTO (HTTPS via SSLClient en otro módulo) =========
 static bool telegram_send_text(const String& text) {
-  if (!g_net_registered) { Serial.println("[TG] sin red"); return false; }
-  if (!g_pdp_up)         { Serial.println("[TG] sin PDP"); return false; }
-  String body = String("{\"telegram\":\"") + text + "\"}";
-  if (!modem_lock(200)) { Serial.println("[TG] modem busy"); return false; }
-  int code = http.postJson(netcfg::PATH_PLAIN /*o PATH_TG*/, body.c_str(), netcfg::AUTH_BEARER);
-  modem_unlock();
-  Serial.printf("[TG] relay HTTPS %s -> %d\n", netcfg::PATH_PLAIN, code);
-  return (code == 200 || code == 201 || code == 202);
+  return telegram_send_text_direct(text);
 }
 
 // ===================== Red (tarea) ===========================
@@ -257,8 +246,7 @@ static void net_task(void *arg){
 
         if (up) {
           g_no_pdp_since_ms = 0; g_pdp_ok_since_ms = millis(); g_pref_iridium = false;
-          // Activa HTTPS (insecure para pruebas; usa CA en prod)
-          http.setSecure(true, nullptr);
+          http.setSecure(false, nullptr); // HTTP plano
         } else {
           g_no_pdp_since_ms = millis(); g_pdp_ok_since_ms = 0; g_pref_iridium = true;
         }
@@ -340,7 +328,7 @@ static void save_poi(){
 
     String msg = "[POI] lat=" + String(fx.lat,6) + " lon=" + String(fx.lon,6)
                + " alt=" + String(fx.alt,1) + " UTC=" + utc;
-    telegram_send_text(msg);
+    telegram_send_text(msg);   // DIRECTO A TELEGRAM (en módulo externo)
   }
   g_next_report_type = 4; // one-shot
 }
@@ -363,7 +351,7 @@ static void sos_trigger(){
   String msg = String("[SOS] ") + (g_gsm_imei.length()? g_gsm_imei.c_str() : "IMEI?")
              + " UTC=" + utc
              + (fx.valid ? (" lat=" + String(fx.lat,6) + " lon=" + String(fx.lon,6)) : "");
-  telegram_send_text(msg);
+  telegram_send_text(msg);     // DIRECTO A TELEGRAM
 
   g_next_report_type = 2; // one-shot
 }
@@ -401,7 +389,7 @@ static String make_json_from_report(const OwlReport& rpt) {
     "{"
       "\"tipoReporte\":%d,"
       "\"IMEI\":\"%s\","
-      "\"latitud\":%.6f,"
+      "\"latitud\":%.6f," 
       "\"longitud\":%.6f,"
       "\"altitud\":%.1f,"
       "\"rumbo\":%.1f,"
@@ -486,6 +474,9 @@ void setup(){
   inbox::begin(16);
   inbox::set_persist(sd_inbox_persist);
 
+  // HTTP en claro (no cambiamos nada extra)
+  http.setSecure(false, nullptr);
+
   xTaskCreatePinnedToCore(net_task, "net_task", 4096, nullptr, 1, nullptr, 0);
 }
 
@@ -557,7 +548,7 @@ void loop(){
     // BLE claro
     ble_update(jsonPlain);
 
-    // HTTP o Iridium según prioridad
+    // HTTP o Iridium según prioridad (HTTP sin TLS)
     if (!g_pref_iridium && g_net_registered && g_pdp_up) {
       String gcmB64 = make_gcm_b64_from_json(jsonPlain);
 

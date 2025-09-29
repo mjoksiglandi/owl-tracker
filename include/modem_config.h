@@ -6,7 +6,7 @@
 #define MODEM_BAUD 115200
 
 // RAT
-#define LTE_ONLY 38   // AT+CNMP=38
+// #define LTE_ONLY 38   // AT+CNMP=38
 #define AUTO_MODE 2   // AT+CNMP=2
 
 // ---- API ----
@@ -15,8 +15,8 @@ void modem_power_on(int pinEN, int pinPWR, bool activeHigh = true,
 
 bool modem_init(TinyGsm &m);
 
-// (seguirá existiendo, pero YA NO la usaremos)
-bool modem_set_lte(TinyGsm &m);
+// // (seguirá existiendo, pero YA NO la usaremos)
+// bool modem_set_lte(TinyGsm &m);
 
 // Dejamos el módem en auto-rat (2G/3G/4G/5G)
 bool modem_set_auto(TinyGsm &m);
