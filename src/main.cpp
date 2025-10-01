@@ -7,166 +7,98 @@
 #include <Client.h>
 #include <TinyGsmClient.h>
 
-// Modo de comunicaciones (rotación con BTN4)
+// Conmutador de portador si lo usas (opcional)
 #include "comms_mode.h"
-#include "modem_compat.h"
 
 // Núcleo
 #include "modem_config.h"
 #include "http_client.h"
 #include "net_config.h"
 
-// Sensores / UI
+// OLED/UI/GPS/IR/Buttons
 #include "oled_display.h"
-#include "gps.h"
 #include "ui_state.h"
+#include "gps.h"
 #include "buttons.h"
 #include "iridium.h"
-#include "mag.h"
 
 // BLE + Reporte
 #include "ble.h"
 #include "report.h"
 
-// Cifrado (para HTTP)
+// Cifrado (para HTTP GCM)
 #include "crypto.h"    // owl_encrypt_aes256gcm_base64(...)
-#include "secrets.h"   // OWL_AES256_KEY[32], OWL_GCM_IV_LEN, TG_BOT_TOKEN, TG_CHAT_ID
+#include "secrets.h"   // OWL_AES256_KEY[32], OWL_GCM_IV_LEN
 
-// Inbox unificada
-#include "inbox.h"
-
-// SdFat (FAT32 + exFAT) sobre HSPI
-#include <SdFat.h>
-static SdFs      sd;
-static FsFile    sdFile;
+// SdFat o SD simple (usa la que tengas; aquí SD simple con HSPI)
+#include <FS.h>
+#include <SD.h>
 
 // FreeRTOS
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/semphr.h"
-
-// Telegram (DIRECTO por HTTPS con SSLClient en telegram_direct.cpp)
-#include "telegram_direct.h"
 
 // UARTs
 HardwareSerial SerialAT(1);
 HardwareSerial SerialGPS(2);
 
+// TinyGSM + HTTP (sin TLS por ahora)
 TinyGsm modem(SerialAT);
 TinyGsmClient gsmClient(modem);
+OwlHttpClient http(modem, gsmClient, netcfg::HOST, netcfg::PORT);
 
-// SIN TLS para HTTP (dejamos nullptr)
-OwlHttpClient http(modem, gsmClient, nullptr, netcfg::HOST, netcfg::PORT);
-
-SPIClass hspi(HSPI);
-
-// ======== Estado global ========
+// ------- Estado global base -------
 static bool sd_ok = false;
 static bool g_mag_ok = false;
 static bool ble_ok = false;
 
-volatile bool g_net_registered = false;
-volatile bool g_pdp_up = false;
+static volatile bool g_net_registered = false;
+static volatile bool g_pdp_up = false;
 
-// IMEI GSM (cache) y tipo de reporte “one-shot”
 static String g_gsm_imei = "";
 static int g_next_report_type = 1; // 1=Normal, 2=Emergencia, 3=Libre, 4=POI
 
-// TESTING screen
-static char g_last_test[64] = {0};
-static volatile bool g_test_busy = false;
-static uint8_t g_test_page = 0;     // 0..1
+// UI
+static UiScreen g_screen = UiScreen::HOME;
+static int g_csq_cache = 99;
+static char g_rat_label[6] = "--"; // etiqueta simple para la barra superior
+static String g_ip_cache = "";
+static bool g_pref_iridium = false; // fallback dinámico
 
-// ======== Caches de red para UI (solo net_task) ========
-static volatile int     g_csq_cache = 99;
-static char             g_rat_label[6] = "--";
-static String           g_ip_cache = "";
-
-// ======== Preferencia dinámica de portador ========
-static bool g_pref_iridium = false;
-static uint32_t g_no_pdp_since_ms = 0;
-static uint32_t g_pdp_ok_since_ms = 0;
-
-// ======== Mutex TinyGSM ========
-SemaphoreHandle_t g_modem_mtx = nullptr;
-static inline bool modem_lock(uint32_t ms=15000){
-  if (!g_modem_mtx) return false;
-  return xSemaphoreTake(g_modem_mtx, pdMS_TO_TICKS(ms)) == pdTRUE;
-}
-static inline void modem_unlock(){
-  if (g_modem_mtx) xSemaphoreGive(g_modem_mtx);
-}
-
-// ===================== LOG helpers ===========================
+// ======== LOG helpers ========
 static inline void LOG(const char *s){
   if (Serial) Serial.println(s);
 }
 static inline void LOGF(const char *fmt, ...){
   if (!Serial) return;
   char buf[192];
-  va_list ap; va_start(ap, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);   // <-- corregido: incluye fmt
   va_end(ap);
   Serial.println(buf);
 }
 
-// ===================== SdFat helpers (HSPI + exFAT/FAT32) ====
+// ===================== SD (HSPI simple) =====================
+SPIClass hspi(HSPI);
 static bool sd_begin_hspi(){
   hspi.end();
   hspi.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
-
-  SdSpiConfig cfg(PIN_SD_CS, SHARED_SPI, SD_SCK_MHZ(20), &hspi);
-
-  if (!sd.begin(cfg)) {
-    Serial.println("[SD] init failed (no FAT/exFAT detectado)");
-    // sd.initErrorHalt();  // evitar halt duro
-    return false;
-  }
-
-  // Directorios
-  if (!sd.exists("/logs"))   { if (!sd.mkdir("/logs")) return false; }
-  if (!sd.exists("/inbox"))  { if (!sd.mkdir("/inbox")) return false; }
-
-  // Valida archivos (track + events + messages)
-  {
-    FsFile f = sd.open("/logs/track.csv",  O_WRITE | O_CREAT | O_APPEND);
-    if (!f) return false; f.close();
-  }
-  {
-    FsFile f = sd.open("/logs/events.csv", O_WRITE | O_CREAT | O_APPEND);
-    if (!f) return false; f.close();
-  }
-  {
-    FsFile f = sd.open("/inbox/messages.csv", O_WRITE | O_CREAT | O_APPEND);
-    if (!f) return false; f.close();
-  }
-
-  uint32_t volType = sd.fatType(); // 0=exFAT, 12/16/32
-  if (volType == 0)  Serial.println("[SD] exFAT OK");
-  else               Serial.printf("[SD] FAT%u OK\n", volType);
-
+  if (!SD.begin(PIN_SD_CS, hspi)) return false;
+  if (SD.cardType() == CARD_NONE) return false;
   return true;
 }
 static void sd_logln(const String& line){
-  if (!sd.card()) return;
-  FsFile f = sd.open("/logs/track.csv", O_WRITE | O_CREAT | O_APPEND);
-  if (!f) return; f.println(line); f.close();
-}
-static void sd_eventln(const String& line){
-  if (!sd.card()) return;
-  FsFile f = sd.open("/logs/events.csv", O_WRITE | O_CREAT | O_APPEND);
-  if (!f) return; f.println(line); f.close();
-}
-static void sd_inbox_persist(const inbox::Msg& m){
-  if (!sd.card()) return;
-  String body = m.body; body.replace("\"", "\"\"");
-  char head[48]; snprintf(head, sizeof(head), "%lu,%s,", (unsigned long)m.ts_ms, m.source);
-  FsFile f = sd.open("/inbox/messages.csv", O_WRITE | O_CREAT | O_APPEND);
-  if (!f) return;
-  f.print(head); f.print("\""); f.print(body); f.println("\""); f.close();
+  if (!sd_ok) return;
+  File f = SD.open("/logs/track.csv", FILE_APPEND);
+  if (!f) {
+    SD.mkdir("/logs");
+    f = SD.open("/logs/track.csv", FILE_APPEND);
+  }
+  if (f){ f.println(line); f.close(); }
 }
 
-// ===================== I2C seguro ============================
+// ===================== I2C ============================
 static void i2c_init_safe(){
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 400000);
   Wire.setTimeOut(20);
@@ -176,211 +108,13 @@ static bool i2c_probe(uint8_t addr){
   return (Wire.endTransmission() == 0);
 }
 
-// ===== Iridium enqueue (stub opcional) =====
+// ===== Iridium enqueue (stub por ahora) =====
 static bool iridium_send_json_stub(const String& s) {
-  Serial.printf("[IR] (send-json) %s\n", s.c_str());
+  Serial.printf("[IR] (plain queued) %s\n", s.c_str());
   return false;
 }
 
-// ============== Telegram DIRECTO (HTTPS via SSLClient en otro módulo) =========
-static bool telegram_send_text(const String& text) {
-  return telegram_send_text_direct(text);
-}
-
-// ===================== Red (tarea) ===========================
-static void net_task(void *arg){
-  enum class NState { ST_POWER, ST_AT_PROBE, ST_REG_WAIT, ST_PDP_UP, ST_RUN, ST_SLEEP };
-  NState st = NState::ST_POWER;
-
-  uint32_t backoff_ms = 2000;
-  const uint32_t backoff_max = 30000;
-
-  for (;;){
-    switch (st){
-      case NState::ST_POWER: {
-        modem_power_on(PIN_MODEM_EN, PIN_MODEM_PWR, true, 1200, 6000);
-        LOG("[NET] power on");
-        st = NState::ST_AT_PROBE;
-      } break;
-
-      case NState::ST_AT_PROBE: {
-        bool ok = false;
-        uint32_t t0 = millis();
-        for (int i = 0; i < 5 && millis() - t0 < 3000 && !ok; ++i){
-          SerialAT.print("AT\r");
-          delay(200);
-          String buf;
-          while (SerialAT.available()) buf += (char)SerialAT.read();
-          if (buf.indexOf("OK") >= 0) ok = true;
-        }
-        if (!ok){
-          LOG("[NET] no AT, backoff");
-          st = NState::ST_SLEEP;
-          break;
-        }
-        modem_set_auto(modem);       // auto 2G/3G/4G
-        modem_radio_tune(modem);     // sin PSM/eDRX durante pruebas
-        st = NState::ST_REG_WAIT;
-      } break;
-
-      case NState::ST_REG_WAIT: {
-        bool reg = modem_wait_for_network(modem, 45000);
-        g_net_registered = reg;
-        if (!reg){
-          LOG("[NET] sin registro, backoff");
-          st = NState::ST_SLEEP;
-          break;
-        }
-        st = NState::ST_PDP_UP;
-      } break;
-
-      case NState::ST_PDP_UP: {
-        if (!modem_lock(20000)) { st = NState::ST_SLEEP; break; }
-        bool up = modem.gprsConnect(netcfg::APN, netcfg::APN_USER, netcfg::APN_PASS);
-        modem_unlock();
-
-        g_pdp_up = up;
-        LOGF("[NET] PDP %s", up ? "UP" : "DOWN");
-        modem_print_status(modem);
-        modem_dump_regs(modem);
-
-        if (up) {
-          g_no_pdp_since_ms = 0; g_pdp_ok_since_ms = millis(); g_pref_iridium = false;
-          http.setSecure(false, nullptr); // HTTP plano
-        } else {
-          g_no_pdp_since_ms = millis(); g_pdp_ok_since_ms = 0; g_pref_iridium = true;
-        }
-        st = NState::ST_RUN;
-      } break;
-
-      case NState::ST_RUN: {
-        vTaskDelay(pdMS_TO_TICKS(300));
-
-        bool reg = modem.isNetworkConnected();
-        g_net_registered = reg;
-        #ifdef TINY_GSM_MODEM_SIM7600
-          bool pdp = modem.isGprsConnected();
-        #else
-          bool pdp = (modem.localIP() != IPAddress(0,0,0,0));
-        #endif
-        g_pdp_up = pdp;
-
-        uint32_t now = millis();
-        if (pdp) {
-          if (g_pdp_ok_since_ms == 0) g_pdp_ok_since_ms = now;
-          if (g_pdp_ok_since_ms && (now - g_pdp_ok_since_ms) >= 10000) {
-            if (g_pref_iridium) { g_pref_iridium = false; Serial.println("[NET] PDP estable: prioridad GSM/LTE"); }
-          }
-          g_no_pdp_since_ms = 0;
-        } else {
-          if (g_no_pdp_since_ms == 0) g_no_pdp_since_ms = now;
-          if (!g_pref_iridium && (now - g_no_pdp_since_ms) >= 30000) {
-            g_pref_iridium = true; Serial.println("[NET] Sin PDP sostenido: prioridad IRIDIUM");
-          }
-          g_pdp_ok_since_ms = 0;
-        }
-
-        if (modem_lock(500)){
-          int csq = modem.getSignalQuality();
-          g_csq_cache = (csq < 0 ? 99 : csq);
-
-          String r = modem_rat_label(modem);
-          r.toCharArray((char*)g_rat_label, sizeof(g_rat_label));
-
-          if (pdp){
-            IPAddress ip = modem.localIP();
-            g_ip_cache = ip.toString();
-          } else {
-            g_ip_cache = "";
-          }
-
-          if (g_gsm_imei.length() == 0 && reg){
-            String imeiTry = modem.getIMEI();
-            if (imeiTry.length() > 0) g_gsm_imei = imeiTry;
-          }
-          modem_unlock();
-        }
-      } break;
-
-      case NState::ST_SLEEP: {
-        vTaskDelay(pdMS_TO_TICKS(backoff_ms));
-        backoff_ms = (backoff_ms < backoff_max) ? (backoff_ms * 2) : backoff_max;
-        st = NState::ST_POWER;
-      } break;
-    }
-    vTaskDelay(pdMS_TO_TICKS(50));
-  }
-}
-
-// ===================== Acciones UI ===========================
-static void save_poi(){
-  GpsFix fx = gps_last_fix();
-  if (!fx.valid){
-    LOG("[Owl] POI cancelado: sin fix");
-  } else {
-    String utc = fx.utc.length() ? (fx.utc + "Z") : String("");
-    String s = String("POI,") + utc + "," +
-               String(fx.lat, 6) + "," +
-               String(fx.lon, 6) + "," +
-               String(fx.alt, 1);
-    LOG(("[Owl][EVENT] " + s).c_str());
-    sd_eventln(s);
-
-    String msg = "[POI] lat=" + String(fx.lat,6) + " lon=" + String(fx.lon,6)
-               + " alt=" + String(fx.alt,1) + " UTC=" + utc;
-    telegram_send_text(msg);   // DIRECTO A TELEGRAM (en módulo externo)
-  }
-  g_next_report_type = 4; // one-shot
-}
-static void sos_trigger(){
-  LOG("[Owl] SOS TRIGGERED!");
-  GpsFix fx = gps_last_fix();
-  String utc = fx.utc.length() ? (fx.utc + "Z") : String("");
-  String s;
-  if (fx.valid) {
-    s = String("SOS,") + utc + "," +
-        String(fx.lat, 6) + "," +
-        String(fx.lon, 6) + "," +
-        String(fx.alt, 1);
-  } else {
-    s = String("SOS,") + utc;
-  }
-  sd_eventln(s);
-  LOGF("[Owl][EVENT] %s", s.c_str());
-
-  String msg = String("[SOS] ") + (g_gsm_imei.length()? g_gsm_imei.c_str() : "IMEI?")
-             + " UTC=" + utc
-             + (fx.valid ? (" lat=" + String(fx.lat,6) + " lon=" + String(fx.lon,6)) : "");
-  telegram_send_text(msg);     // DIRECTO A TELEGRAM
-
-  g_next_report_type = 2; // one-shot
-}
-
-// ===================== Pantallas =============================
-static UiScreen g_screen = UiScreen::HOME;
-
-static UiScreen next_screen_normal(UiScreen cur){
-  static const UiScreen order[] = {
-    UiScreen::HOME,
-    UiScreen::GPS_DETAIL,
-    UiScreen::IRIDIUM_DETAIL,
-    UiScreen::GSM_DETAIL,
-    UiScreen::BLE_DETAIL,
-    UiScreen::SYS_CONFIG,
-    UiScreen::MESSAGES
-  };
-  size_t n = sizeof(order)/sizeof(order[0]);
-  size_t idx = 0;
-  for (size_t i=0;i<n;i++){ if (order[i]==cur){ idx = i; break; } }
-  return order[(idx+1)%n];
-}
-
-static const char* mode_name_from_comms(){
-  const char* n = comms_mode_name(comms_mode_get());
-  return n ? n : "AUTO";
-}
-
-// ======= Helpers JSON / GCM para uplink =======
+// ===================== Helpers de reporte ====================
 static String make_json_from_report(const OwlReport& rpt) {
   char buf[384];
   auto nz  = [](double v){ return std::isnan(v) ? 0.0 : v; };
@@ -389,7 +123,7 @@ static String make_json_from_report(const OwlReport& rpt) {
     "{"
       "\"tipoReporte\":%d,"
       "\"IMEI\":\"%s\","
-      "\"latitud\":%.6f," 
+      "\"latitud\":%.6f,"
       "\"longitud\":%.6f,"
       "\"altitud\":%.1f,"
       "\"rumbo\":%.1f,"
@@ -413,30 +147,106 @@ static String make_gcm_b64_from_json(const String& jsonPlain) {
     (const uint8_t*)jsonPlain.c_str(), jsonPlain.length(),
     iv, sizeof(iv)
   );
-  return b64;
+  return b64; // sin prefijo; ya tiene '|' separando AD/IV/CIPH
 }
 
-// ===================== SETUP =================================
+// ===================== Acciones =======================
+static void save_poi(){
+  GpsFix fx = gps_last_fix();
+  if (!fx.valid) {
+    LOG("[Owl] POI cancelado: sin fix");
+    return;
+  }
+  String s = "POI," + fx.utc + "," + String(fx.lat,6) + "," + String(fx.lon,6) + "," + String(fx.alt,1);
+  LOG(("[Owl] " + s).c_str());
+  sd_logln(s);
+  g_next_report_type = 4;
+}
+static void sos_trigger(){
+  LOG("[Owl] SOS TRIGGERED!");
+  sd_logln(String("SOS,") + String(millis()));
+  g_next_report_type = 2;
+}
+
+// ===================== net_task (FSM estable) =======================
+static void net_task(void *){
+  enum class NState { ST_POWER, ST_AT, ST_REG, ST_PDP, ST_RUN, ST_SLEEP };
+  NState st = NState::ST_POWER;
+  uint32_t backoff = 2000, backoff_max = 30000;
+
+  for(;;){
+    switch(st){
+      case NState::ST_POWER:{
+        modem_power_on(PIN_MODEM_EN, PIN_MODEM_PWR, true, 1200, 6000);
+        LOG("[NET] power on");
+        st = NState::ST_AT;
+      } break;
+
+      case NState::ST_AT:{
+        bool ok = modem.testAT();
+        if (!ok){ LOG("[NET] no AT → SLEEP"); st = NState::ST_SLEEP; break; }
+        modem_set_auto(modem); // AT+CNMP=2 (AUTO)
+        st = NState::ST_REG;
+      } break;
+
+      case NState::ST_REG:{
+        bool reg = modem.waitForNetwork(10000);
+        g_net_registered = reg;
+        if (!reg){ LOG("[NET] sin registro → SLEEP"); st = NState::ST_SLEEP; break; }
+        LOG("[NET] registrado");
+        st = NState::ST_PDP;
+      } break;
+
+      case NState::ST_PDP:{
+        bool up = modem.gprsConnect(netcfg::APN, netcfg::APN_USER, netcfg::APN_PASS);
+        g_pdp_up = up;
+        LOGF("[NET] PDP %s", up ? "UP" : "DOWN");
+        st = NState::ST_RUN;
+      } break;
+
+      case NState::ST_RUN:{
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        bool reg = modem.isNetworkConnected();
+        g_net_registered = reg;
+        bool pdp = modem.isGprsConnected();  // ✅ SIM76XX/A7670 confiable
+        g_pdp_up = pdp;
+
+        // caches para UI
+        g_csq_cache = modem.getSignalQuality();
+        if (pdp) {
+          g_ip_cache = modem.localIP().toString();
+          strncpy(g_rat_label, "4G", sizeof(g_rat_label)); // marcador simple
+          g_pref_iridium = false; // prioriza GSM si PDP ok
+        } else {
+          g_ip_cache = "";
+          strncpy(g_rat_label, "--", sizeof(g_rat_label));
+          // NO resetea: deja fallback a Iridium desde loop
+        }
+
+        if (!reg){ LOG("[NET] sin registro → SLEEP"); st = NState::ST_SLEEP; }
+      } break;
+
+      case NState::ST_SLEEP:{
+        vTaskDelay(pdMS_TO_TICKS(backoff));
+        backoff = (backoff < backoff_max) ? (backoff * 2) : backoff_max;
+        st = NState::ST_POWER;
+      } break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+}
+
+// ===================== SETUP ==========================
 void setup(){
   Serial.begin(115200);
   delay(50);
   LOG("\n[Owl] Boot");
-
-  g_modem_mtx = xSemaphoreCreateMutex();
 
   WiFi.mode(WIFI_OFF);
 
   oled_init();
   oled_splash("Owl Tracker");
   delay(400);
-
-  // HOME “en vacío”
-  {
-    OwlUiData bootUi;
-    bootUi.csq = 99; bootUi.iridiumLvl = -1; bootUi.sats = -1; bootUi.pdop = -1;
-    bootUi.lat = bootUi.lon = bootUi.alt = NAN; bootUi.utc = ""; bootUi.msgRx = 0;
-    oled_draw_dashboard(bootUi, "--");
-  }
 
   buttons_begin();
 
@@ -448,87 +258,82 @@ void setup(){
 
   i2c_init_safe();
 
-  if (i2c_probe(0x0E)){
-    g_mag_ok = mag_begin();
+  if (i2c_probe(0x0E)) {
+    g_mag_ok = true; // mag_begin() si lo tienes
     LOGF("[I2C] MAG %s", g_mag_ok ? "OK" : "NO");
   } else {
     LOG("[I2C] IST8310 no detectado");
   }
 
-  bool ir_ok = false;
-  if (i2c_probe(IRIDIUM_I2C_ADDR)){
-    ir_ok = iridium_begin();
+  if (i2c_probe(IRIDIUM_I2C_ADDR)) {
+    bool ir_ok = iridium_begin();
     LOGF("[IR] presente=%s", ir_ok ? "SI" : "NO");
   } else {
-    LOG("[IR] sin ACK en 0x63; se omite init");
+    LOG("[IR] sin ACK 0x63");
   }
 
-  // SD (exFAT/FAT32 vía SdFat)
   sd_ok = sd_begin_hspi();
   LOGF("[Owl] SD %s", sd_ok ? "OK" : "NO");
 
   ble_ok = ble_begin("OwlTracker");
   LOGF("[BLE] %s", ble_ok ? "advertising" : "init fail");
 
-  // Inbox unificada + persistencia en SD
-  inbox::begin(16);
-  inbox::set_persist(sd_inbox_persist);
-
-  // HTTP en claro (no cambiamos nada extra)
-  http.setSecure(false, nullptr);
-
-  xTaskCreatePinnedToCore(net_task, "net_task", 4096, nullptr, 1, nullptr, 0);
+  xTaskCreatePinnedToCore(net_task, "net_task", 8192, nullptr, 1, nullptr, 0);
 }
 
-// ===================== LOOP =================================
+// ===================== LOOP ==========================
 void loop(){
-  // ---------- BOTONES ----------
-  static uint32_t t_btn = 0;
-  if (millis() - t_btn >= 2){
-    t_btn = millis();
-    buttons_poll();
-
-    if (auto e = btn1_get(); true){
-      if (e.shortPress) g_screen = UiScreen::HOME;
-      if (e.longPress || e.repeat){
-        if (g_screen == UiScreen::TESTING) g_test_page = (uint8_t)((g_test_page + 1) % 2);
-        else g_screen = next_screen_normal(g_screen);
-      }
-    }
-    if (auto e2 = btn2_get(); true){
-      if (e2.shortPress && g_screen != UiScreen::TESTING) g_screen = UiScreen::MESSAGES;
-      if (e2.longPress  && g_screen != UiScreen::TESTING) save_poi();
-    }
-    if (auto e3 = btn3_get(); e3.longPress && g_screen != UiScreen::TESTING) sos_trigger();
-    if (auto e4 = btn4_get(); true){
-      if (e4.shortPress && g_screen != UiScreen::TESTING){
-        auto m = comms_mode_get();
-        m = comms_mode_next(m);
-        comms_mode_set(m);
-        const char* name = comms_mode_name(m);
-        snprintf(g_last_test, sizeof(g_last_test), "Mode -> %s", name ? name : "AUTO");
-      }
-      if (e4.longPress){
-        if (g_screen == UiScreen::TESTING) g_screen = UiScreen::HOME;
-        else { g_test_page = 0; g_screen = UiScreen::TESTING; }
-      }
-    }
-  }
-
-  // Sensores / servicios
   gps_poll(SerialGPS);
-  if (g_mag_ok) mag_poll();
   iridium_poll();
   ble_poll();
 
-  // ----------------- UPLINK (cada 10 s) -----------------
+  // --------- Botones ---------
+  static uint32_t t_btn = 0;
+  if (millis() - t_btn >= 10){
+    t_btn = millis();
+    buttons_poll();
+
+    if (auto e = btn1_get(); e.shortPress){
+      g_screen = UiScreen::HOME;
+    } else if (e.longPress){
+      g_screen = UiScreen::GPS_DETAIL;
+    }
+
+    if (auto e2 = btn2_get(); e2.shortPress){
+      g_screen = UiScreen::MESSAGES;
+    } else if (e2.longPress){
+      save_poi();
+    }
+
+    if (auto e3 = btn3_get(); e3.longPress){
+      sos_trigger();
+    }
+
+    // BTN4: puedes rotar modo o abrir testing si tienes esa pantalla
+    if (auto e4 = btn4_get(); e4.shortPress){
+      // rotación de modo si tienes conmutador
+      // auto m = comms_mode_get();
+      // m = comms_mode_next(m);
+      // comms_mode_set(m);
+    } else if (e4.longPress){
+      g_screen = UiScreen::TESTING;
+    }
+  }
+
+  // ---------- Uplink cada 10 s ----------
   static uint32_t t_uplink = 0;
-  const uint32_t UPLINK_PERIOD_MS = netcfg::UPLINK_PERIOD_MS;  // 10 s
+  const uint32_t UPLINK_PERIOD_MS = 10000; // o netcfg::UPLINK_PERIOD_MS si lo tienes
   if (millis() - t_uplink >= UPLINK_PERIOD_MS) {
     t_uplink = millis();
 
     GpsFix fx = gps_last_fix();
     IridiumInfo ir = iridium_status();
+
+    // Cachea IMEI GSM cuando esté registrado
+    if (g_gsm_imei.length() == 0 && g_net_registered){
+      String imeiTry = modem.getIMEI();
+      if (imeiTry.length()) g_gsm_imei = imeiTry;
+    }
 
     OwlReport rpt;
     rpt.tipoReporte = g_next_report_type;
@@ -543,45 +348,33 @@ void loop(){
     rpt.velocidad = fx.speed_mps;
     rpt.fechaHora = fx.utc.length() ? (fx.utc + "Z") : String("");
 
+    // BLE (tu ble_update acepta OwlReport)
+    ble_update(rpt);
+
+    // Serial debug: plaintext y GCM
     String jsonPlain = make_json_from_report(rpt);
+    String gcmB64    = make_gcm_b64_from_json(jsonPlain);
+    Serial.println("[BLE] JSON plaintext:");
+    Serial.println(jsonPlain);
+    Serial.println("[BLE] Base64 ciphertext (GCM):");
+    Serial.println(gcmB64);
 
-    // BLE claro
-    ble_update(jsonPlain);
-
-    // HTTP o Iridium según prioridad (HTTP sin TLS)
-    if (!g_pref_iridium && g_net_registered && g_pdp_up) {
-      String gcmB64 = make_gcm_b64_from_json(jsonPlain);
-
-      if (modem_lock(200)) {
-        int code_plain = http.postJson(netcfg::PATH_PLAIN, jsonPlain.c_str(), netcfg::AUTH_BEARER);
-        modem_unlock();
-        Serial.printf("[HTTP] POST %s -> %d\n", netcfg::PATH_PLAIN, code_plain);
-      } else {
-        Serial.println("[HTTP] skip (modem busy)");
-      }
+    // HTTP (si PDP) o Iridium
+    if (g_net_registered && g_pdp_up) {
+      int code_plain = http.postJson(netcfg::PATH_PLAIN, jsonPlain.c_str(), netcfg::AUTH_BEARER);
+      Serial.printf("[HTTP] POST %s -> %d\n", netcfg::PATH_PLAIN, code_plain);
 
       String body = String("{\"gcm_b64\":\"") + gcmB64 + "\"}";
-      if (modem_lock(200)) {
-        int code_gcm = http.postJson(netcfg::PATH_GCM, body.c_str(), netcfg::AUTH_BEARER);
-        modem_unlock();
-        Serial.printf("[HTTP] POST %s -> %d\n", netcfg::PATH_GCM, code_gcm);
-      } else {
-        Serial.println("[HTTP] skip (modem busy gcm)");
-      }
-
+      int code_gcm = http.postJson(netcfg::PATH_GCM, body.c_str(), netcfg::AUTH_BEARER);
+      Serial.printf("[HTTP] POST %s -> %d\n", netcfg::PATH_GCM, code_gcm);
     } else {
-      if (ir.present) {
-        bool ok = iridium_send_json_stub(jsonPlain);
-        Serial.printf("[IR] send %s\n", ok ? "OK" : "FALLBACK");
-      } else {
-        Serial.println("[IR] no present; sólo BLE");
-      }
+      iridium_send_json_stub(jsonPlain);
     }
 
     g_next_report_type = 1;
   }
 
-  // ----------------- UI (1 Hz) -----------------
+  // ---------- UI cada 1 s ----------
   static uint32_t t_ui = 0;
   if (millis() - t_ui >= 1000){
     t_ui = millis();
@@ -600,24 +393,25 @@ void loop(){
     ui.speed_mps = fx.speed_mps;
     ui.course_deg = fx.course_deg;
     ui.pressure_hpa = NAN;
-    ui.msgRx = inbox::unread_count();
+    ui.msgRx = ir.waiting ? 1 : 0;
     ui.utc = fx.utc.length() ? (fx.utc + "Z") : String("");
 
     static UiScreen lastScreen = UiScreen::HOME;
     static OwlUiData last = {};
-    auto neq = [](double x, double y, double eps){ return !(fabs(x - y) <= eps); };
+    auto neq = [](double x, double y, double eps) { return !(fabs(x-y) <= eps); };
     auto changed = [&](const OwlUiData &a, const OwlUiData &b){
       return a.csq != b.csq || a.iridiumLvl != b.iridiumLvl || a.sats != b.sats ||
              neq(a.pdop, b.pdop, 0.1) || neq(a.lat, b.lat, 1e-7) ||
              neq(a.lon, b.lon, 1e-7) || neq(a.alt, b.alt, 0.3) ||
-             a.msgRx != b.msgRx || a.utc != b.utc;
+             a.msgRx != b.msgRx || a.utc != b.utc ||
+             neq(a.speed_mps, b.speed_mps, 0.1) || neq(a.course_deg, b.course_deg, 0.5);
     };
 
     bool needRedraw = (g_screen != lastScreen) || changed(ui, last);
     if (needRedraw){
       switch (g_screen){
         case UiScreen::HOME:
-          oled_draw_dashboard(ui, g_rat_label);
+          oled_draw_dashboard(ui, g_rat_label); // <- firma actual
           break;
         case UiScreen::GPS_DETAIL:
           oled_draw_gps_detail(ui);
@@ -631,12 +425,9 @@ void loop(){
           String fwStr = String("fw 1.0.0 ") + (ble_ok ? "BLE:OK" : "BLE:NO");
           oled_draw_sys_config(ui, g_net_registered, g_pdp_up, ipStr, sd_ok, i2cOk, fwStr.c_str());
         } break;
-        case UiScreen::MESSAGES: {
-          uint16_t unread = inbox::unread_count();
-          String   lastMsg = inbox::last_body();
-          oled_draw_messages(unread, lastMsg);
-          inbox::mark_all_read();
-        } break;
+        case UiScreen::MESSAGES:
+          oled_draw_messages(ir.waiting ? 1 : 0, "");
+          break;
         case UiScreen::GSM_DETAIL: {
           auto csq_to_dbm = [](int csq)->int {
             if (csq <= 0)  return -113;
@@ -653,25 +444,8 @@ void loop(){
           oled_draw_ble_detail(bleConn, String("OwlTracker"));
         } break;
         case UiScreen::TESTING: {
-          auto csq_to_dbm = [](int csq)->int {
-            if (csq <= 0)  return -113;
-            if (csq == 1)  return -111;
-            if (csq >= 31) return -51;
-            return -113 + 2 * csq;
-          };
-          int rssiDbm = csq_to_dbm(g_csq_cache);
-          extern bool ble_is_connected();
-          bool bleConn = ble_is_connected();
-          IridiumInfo ir2 = iridium_status();
-
-          oled_draw_testing_adv(
-            mode_name_from_comms(), g_net_registered, g_pdp_up,
-            g_rat_label, g_csq_cache, rssiDbm, g_ip_cache.c_str(),
-            g_gsm_imei.c_str(),
-            ir2.present, ir2.sig, ir2.imei.c_str(), ir2.waiting?1:0,
-            bleConn, (uint32_t)ESP.getFreeHeap(),
-            g_last_test, g_test_busy, g_test_page
-          );
+          // Si tu firma requiere LinkPref y valores, castea 0/1
+          oled_draw_testing((LinkPref)(g_pref_iridium ? 1 : 0), "OK", false);
         } break;
       }
       last = ui;

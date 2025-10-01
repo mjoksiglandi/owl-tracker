@@ -3,43 +3,37 @@
 #include <Client.h>
 #include <TinyGsmClient.h>
 
-// Cliente HTTP que funciona con o sin TLS.
-// Si pasas un tlsClient != nullptr y llamas setSecure(true, ...), usará TLS.
-// Si no, usará tcpClient (HTTP plano).
+/**
+ * OwlHttpClient (versión simple, sin TLS)
+ * - Usa un Client (TinyGsmClient) igual que ArduinoHttpClient.
+ * - Métodos: connect(), disconnect(), postJson(), putJson().
+ * - setSecure(...) existe por compatibilidad pero se ignora.
+ */
 class OwlHttpClient {
 public:
-  OwlHttpClient(TinyGsm& modem,
-                Client& tcpClient,
-                Client* tlsClient,             // puede ser nullptr
-                const char* host, uint16_t port)
-  : modem_(modem),
-    tcp_(&tcpClient),
-    tls_(tlsClient),
-    host_(host),
-    port_(port),
-    use_tls_(false),
-    ca_pem_(nullptr) {}
+  OwlHttpClient(TinyGsm& modem, Client& tcpClient, const char* host, uint16_t port)
+  : modem_(&modem), tcp_(&tcpClient), host_(host), port_(port) {}
 
-  void setEndpoint(const char* host, uint16_t port) { host_ = host; port_ = port; }
+  // Compat: no hace nada en esta versión
+  void setSecure(bool /*enable*/, const char* /*caPem*/ = nullptr) {}
 
-  // Si ca_pem = nullptr y tls_ != nullptr => TLS "insecure" (pruebas)
-  // Si tls_ == nullptr => fuerza HTTP aunque en 'en' pongas true.
-  void setSecure(bool en, const char* ca_pem=nullptr);
-
-  // POST JSON. Devuelve 200..599 o -1 si error de transporte/parsing.
-  int postJson(const char* path, const char* json, const char* bearer = nullptr);
-
-private:
-  int  parseHttpStatus(Stream& s, uint32_t timeout_ms=5000);
-  bool connect();
+  bool connect(uint32_t timeout_ms = 10000);
   void disconnect();
 
+  // Devuelven el código HTTP o -1 si falló
+  int postJson(const char* path, const char* body,
+               const char* bearer = nullptr, uint32_t timeout_ms = 12000);
+  int putJson (const char* path, const char* body,
+               const char* bearer = nullptr, uint32_t timeout_ms = 12000);
+
 private:
-  TinyGsm&  modem_;
-  Client*   tcp_;        // obligatorio (HTTP)
-  Client*   tls_;        // opcional (HTTPS)
+  TinyGsm*  modem_;
+  Client*   tcp_;
   const char* host_;
-  uint16_t    port_;
-  bool        use_tls_;
-  const char* ca_pem_;   // guardado por si tu cliente TLS lo soporta
+  uint16_t  port_;
+
+  int  sendRequest_(const char* method, const char* path, const char* body,
+                    const char* bearer, uint32_t timeout_ms);
+  int  parseStatus_(Stream& s, uint32_t timeout_ms);
+  void drainHeaders_(Stream& s, uint32_t timeout_ms);
 };

@@ -7,8 +7,8 @@
 // -----------------------------
 //  GSM (SIMCom A7670G) - FIJOS
 // -----------------------------
-#define PIN_MODEM_TX   26     // ESP32 -> A7670G RX
-#define PIN_MODEM_RX   27     // ESP32 <- A7670G TX
+#define PIN_MODEM_TX   27     // ESP32 -> A7670G RX
+#define PIN_MODEM_RX   26     // ESP32 <- A7670G TX
 #define PIN_MODEM_PWR   4     // PWRKEY
 #define PIN_MODEM_EN   12     // EN (alto = encendido)
 

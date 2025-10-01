@@ -1,0 +1,162 @@
+// === GSM-only test for LilyGO T-A7670G (A7670) ===
+// Requisitos:
+// - TinyGSM fork (Lewis He) con -D TINY_GSM_MODEM_A7670
+// - ArduinoHttpClient
+// - Tu board_pins.h con PIN_MODEM_RX/TX/EN/PWR
+
+#include "board_pins.h"
+#include <Arduino.h>
+#include <TinyGsmClient.h>
+#include <ArduinoHttpClient.h>
+
+// ---------- CONFIGURACIÓN ----------
+// #define TINY_GSM_MODEM_A7670
+#define TINY_GSM_DEBUG Serial
+
+// SIM PIN (deja "" si tu SIM no usa PIN)
+#ifndef SIM_PIN
+#define SIM_PIN ""
+#endif
+
+// APN (ajústalo a tu operador)
+static const char* APN      = "bam.entelpcs.cl";
+static const char* APN_USER = "";
+static const char* APN_PASS = "";
+
+// Destino para probar HTTP GET (puedes cambiarlo)
+static const char* TEST_HOST = "v4.ident.me";
+static const int   TEST_PORT = 80;
+static const char* TEST_PATH = "/";
+
+// ---------- UARTs ----------
+HardwareSerial SerialAT(1);
+
+// ---------- TinyGSM ----------
+TinyGsm        modem(SerialAT);
+TinyGsmClient  gsmClient(modem);
+HttpClient     http(gsmClient, TEST_HOST, TEST_PORT);
+
+// ---------- Helpers ----------
+static void modem_set_auto_rat(TinyGsm& m) {
+  // AT+CNMP=2 => Auto (2G/3G/4G)
+  Serial.println("[GSM] RAT -> AUTO (CNMP=2)");
+  m.sendAT("+CNMP=2");
+  if (m.waitResponse(2000L) != 1) {
+    Serial.println("[GSM] CNMP=2 falló (continuamos)");
+  }
+}
+
+static void dump_basic_diag(TinyGsm& m) {
+  int csq = m.getSignalQuality(); // 0..31, 99=desconocido
+  String op = m.getOperator();
+  String info = m.getModemInfo();
+
+  Serial.printf("[GSM] Modem: %s\n", info.c_str());
+  Serial.printf("[GSM] Operador: %s\n", op.c_str());
+  Serial.printf("[GSM] CSQ: %d\n", csq);
+
+  // CPSI? (RAT/banda) - salida informativa
+  SerialAT.println("AT+CPSI?");
+  delay(50);
+  while (SerialAT.available()) Serial.write(SerialAT.read());
+}
+
+// Intenta HTTP GET con ArduinoHttpClient
+static bool http_get_test() {
+  Serial.printf("[HTTP] GET http://%s%s ...\n", TEST_HOST, TEST_PATH);
+  int err = http.get(TEST_PATH);
+  if (err != 0) {
+    Serial.printf("[HTTP] get() err=%d\n", err);
+    return false;
+  }
+  int status = http.responseStatusCode();
+  Serial.printf("[HTTP] status=%d\n", status);
+  if (status <= 0) return false;
+
+  String body = http.responseBody();
+  Serial.println("[HTTP] Body:");
+  Serial.println(body);
+  http.stop();
+  Serial.println("[HTTP] done");
+  return (status == 200);
+}
+
+// ---------- SETUP ----------
+void setup() {
+  Serial.begin(115200);
+  delay(50);
+  Serial.println("\n[GSM-TEST] Boot");
+
+  // Desactiva WiFi para evitar ruido
+  // // #ifdef ARDUINO_ARCH_ESP32
+  // #include <WiFi.h>
+  // WiFi.mode(WIFI_OFF);
+  // // #endif
+
+  // UART del módem
+  SerialAT.begin(115200, SERIAL_8N1, PIN_MODEM_RX, PIN_MODEM_TX);
+  delay(100);
+
+  // (Opcional) controla power si tu board lo requiere
+  pinMode(PIN_MODEM_EN, OUTPUT);
+  pinMode(PIN_MODEM_PWR, OUTPUT);
+  digitalWrite(PIN_MODEM_EN, HIGH);
+  delay(50);
+
+  // PWRKEY pulse: HIGH ~1.2s, espera ~6s (según tu board)
+  digitalWrite(PIN_MODEM_PWR, HIGH);
+  delay(1200);
+  digitalWrite(PIN_MODEM_PWR, LOW);
+  delay(6000);
+
+  // Inicializa módem
+  Serial.println("[GSM] init...");
+  // modem.restart(); // también vale, pero init() es más rápido si ya está encendido
+  modem.init();
+  delay(200);
+
+  // RAT auto (2G/3G/4G)
+  modem_set_auto_rat(modem);
+
+  // SIM PIN (si aplica)
+  if (strlen(SIM_PIN) > 0 && modem.getSimStatus() != SIM_READY) {
+    bool ok = modem.simUnlock(SIM_PIN);
+    Serial.printf("[GSM] simUnlock -> %s\n", ok ? "OK" : "FAIL");
+  }
+
+  dump_basic_diag(modem);
+
+  // Registro de red (hasta 60s)
+  Serial.print("[GSM] Esperando red...");
+  bool reg = modem.waitForNetwork(60000);
+  Serial.println(reg ? "OK" : "FAIL");
+  if (!reg) return;
+
+  if (modem.isNetworkConnected()) Serial.println("[GSM] Network connected");
+
+  // GPRS / PDP
+  Serial.printf("[GSM] Conectando APN=%s ...\n", APN);
+  bool up = modem.gprsConnect(APN, APN_USER, APN_PASS);
+  Serial.println(up ? "[GSM] PDP UP" : "[GSM] PDP FAIL");
+  if (!up) return;
+
+  #if defined(TINY_GSM_MODEM_A7670) || defined(TINY_GSM_MODEM_SIM7600)
+    Serial.printf("[GSM] isGprsConnected=%d\n", modem.isGprsConnected());
+  #else
+    Serial.printf("[GSM] IP=%s\n", modem.localIP().toString().c_str());
+  #endif
+
+  // HTTP GET
+  bool ok = http_get_test();
+  Serial.printf("[TEST] HTTP GET -> %s\n", ok ? "OK" : "FAIL");
+}
+
+// ---------- LOOP ----------
+void loop() {
+  static uint32_t t0 = millis();
+  if (millis() - t0 > 10000) { // cada 10 s re-imprime diag básico
+    t0 = millis();
+    dump_basic_diag(modem);
+  }
+  delay(50);
+}
